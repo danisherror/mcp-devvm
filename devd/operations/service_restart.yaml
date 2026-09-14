@@ -1,0 +1,31 @@
+id: service.restart
+version: 1
+summary: "Restart a declared service"
+
+params:
+  service:
+    type: enum
+    values: [web, worker]
+
+effect:
+  description: |
+    Restarts the {service} service by rewriting its state file. This is a
+    template stand-in for `systemctl restart {service}`: it demonstrates the
+    approval/precondition/sandbox path a real service-control operation
+    would take, without requiring a real init system inside the demo
+    container.
+  writes: ["/srv/services/{service}.state"]
+  reads: ["/srv/services/{service}.state"]
+  network: []
+  services: ["{service}"]
+
+risk: SERVICE_CONTROL
+approval: required
+
+preconditions:
+  - service.is_active
+
+sandbox:
+  mode: namespace
+  timeout_s: 15
+  max_output_bytes: 8192

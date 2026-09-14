@@ -1,0 +1,40 @@
+id: git.checkout
+version: 1
+summary: "Check out a branch in a workspace repository"
+
+params:
+  repo:
+    type: enum
+    values: [api, web]
+  branch:
+    type: string
+    pattern: '^[A-Za-z0-9._/-]{1,100}$'
+    max_length: 100
+    allow_leading_dash: false
+
+effect:
+  description: |
+    Checks out {branch} in the {repo} workspace. Leaves untracked files
+    alone. Does not push, reset, or delete anything. Local-only: this demo
+    checks out among branches that already exist in the repository, with
+    no network access.
+  writes: ["/srv/workspace/{repo}"]
+  reads: ["/srv/workspace/{repo}"]
+  network: []
+  services: []
+
+risk: MUTATING_LOCAL
+approval: required
+
+preconditions:
+  - git.head_sha
+  - git.worktree_clean
+
+reversible:
+  kind: git_ref
+  restore_hint: "git checkout {preconditions.git.head_sha}"
+
+sandbox:
+  mode: namespace
+  timeout_s: 30
+  max_output_bytes: 65536

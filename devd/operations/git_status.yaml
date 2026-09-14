@@ -1,0 +1,27 @@
+id: git.status
+version: 1
+summary: "Show working tree status and current HEAD for a workspace repository"
+
+params:
+  repo:
+    type: enum
+    values: [api, web]
+
+effect:
+  description: |
+    Reports the current branch, HEAD commit, and working tree status for
+    {repo}. Read-only: makes no changes.
+  writes: []
+  reads: ["/srv/workspace/{repo}"]
+  network: []
+  services: []
+
+risk: READ_ONLY
+approval: not_required
+
+preconditions: []
+
+sandbox:
+  mode: namespace
+  timeout_s: 10
+  max_output_bytes: 65536

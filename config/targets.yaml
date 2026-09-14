@@ -1,0 +1,13 @@
+# Server-side only -- the agent never sees anything below `label` (doc §9.2).
+# ssh_host/host_key are filled in by scripts/setup_dev_vm.sh once the demo
+# container is up; the placeholders below are what a fresh checkout ships.
+targets:
+  dev-vm-01:
+    label: "Dev VM (local demo)"
+    ssh_host: 127.0.0.1
+    ssh_port: 2222
+    ssh_user: devd-tunnel
+    host_key: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIDoxrE3T9GET+tjZ0F58hIIrPAKvGNC320jNf6RPC8xe"
+    local_socket_path: "data/sockets/dev-vm-01.sock"
+    remote_socket_path: "/run/devd/devd.sock"
+    max_concurrent_runs: 3

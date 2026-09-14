@@ -1,0 +1,27 @@
+id: logs.tail
+version: 1
+summary: "Tail the last N lines of the application log"
+
+params:
+  lines:
+    type: integer
+    min_value: 1
+    max_value: 1000
+
+effect:
+  description: |
+    Reads the last {lines} lines of the application log. Read-only.
+  writes: []
+  reads: ["/srv/logs"]
+  network: []
+  services: []
+
+risk: READ_ONLY
+approval: not_required
+
+preconditions: []
+
+sandbox:
+  mode: namespace
+  timeout_s: 10
+  max_output_bytes: 262144

@@ -1,0 +1,5 @@
+# user_id -> roles for the local topology (doc §9.1: the OS session
+# identifies the user; this file is the policy-facing role grant on top of
+# that identification). user_id is always "os:<unix-username>".
+users:
+  "os:agent": [developer, tech-lead]

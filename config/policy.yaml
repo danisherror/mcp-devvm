@@ -1,0 +1,17 @@
+# user x target x operation x risk (doc §10.1). PRIVILEGE is deliberately
+# absent from every rule below -- it is also hard-denied in code
+# (server/policy/matrix.py), so this isn't the only thing stopping it.
+policies:
+  - roles: [developer]
+    targets: [dev-vm-01]
+    operations: ["git.*", "logs.*"]
+    risks: [READ_ONLY, MUTATING_LOCAL]
+    max_runs_per_hour: 60
+
+  - roles: [tech-lead]
+    targets: [dev-vm-01]
+    operations: ["git.*", "logs.*", "service.*"]
+    risks: [READ_ONLY, MUTATING_LOCAL, SERVICE_CONTROL]
+    require_step_up: [SERVICE_CONTROL]
+    require_four_eyes: []
+    max_runs_per_hour: 120
