@@ -83,6 +83,63 @@ The running MCP server's background dispatcher notices the approval (a
 separate process writing to the same SQLite store) within ~2s and executes
 it. `check_run_status(approval_id)` from the agent shows the outcome.
 
+## Using this from VS Code (Copilot Chat agent mode)
+
+VS Code's built-in MCP support (via the GitHub Copilot Chat extension's
+Agent mode) reads server definitions from a `.vscode/mcp.json` file in the
+workspace. Create one at the repo root:
+
+```json
+{
+  "servers": {
+    "mcp-devvm": {
+      "type": "stdio",
+      "command": "${workspaceFolder}/.venv/bin/python",
+      "args": ["-m", "server.main"],
+      "cwd": "${workspaceFolder}"
+    }
+  }
+}
+```
+
+On Windows, use `"${workspaceFolder}\\.venv\\Scripts\\python.exe"` instead.
+
+**`cwd` matters here specifically**: `server/main.py` resolves `config/` and
+`data/` as paths relative to the process's working directory, not the
+script's location — without `"cwd": "${workspaceFolder}"`, VS Code may
+launch the server from some other directory and every tool call will fail
+looking for a `config/targets.yaml` that isn't there.
+
+Then, before using it:
+
+1. Complete the [Quick start](#quick-start) above first (`.venv` created,
+   `scripts/setup_dev_vm.py` has built and started the container) — the
+   server has nothing to talk to otherwise.
+2. Reload or open the Command Palette (`Cmd/Ctrl+Shift+P`) → **MCP: List
+   Servers** to confirm VS Code picked up `mcp-devvm`, or **MCP: Add Server**
+   if you'd rather click through the setup instead of hand-writing the JSON
+   above (choose "Command (stdio)", point it at the same command/args/cwd,
+   and save it to the workspace).
+3. Open Copilot Chat, switch the mode dropdown at the bottom of the chat box
+   from **Ask**/**Edit** to **Agent**.
+4. Click the tools icon (🔧) in the chat input and confirm `mcp-devvm`'s
+   tools are enabled — `list_operations`, `describe_target`,
+   `run_operation`, `request_operation`, `check_run_status`,
+   `get_run_output`, `list_my_pending_approvals`.
+5. Chat normally — e.g. "check out feature/login-fix in the api repo." The
+   agent calls `request_operation` and stops there; nothing executes.
+
+**The approval step stays outside VS Code's agent loop, on purpose.**
+`server/approvals/decide.py` is deliberately not an MCP tool (doc §7.2,
+B4 — the decision channel the agent cannot reach), so approving or denying
+what the agent proposed happens in an ordinary VS Code integrated terminal
+(`` Ctrl+` ``), same commands as the Quick start section:
+
+```bash
+.venv/bin/python -m server.approvals.decide list
+.venv/bin/python -m server.approvals.decide approve appr_xxxxxxxx
+```
+
 ## The shipped operations
 
 Four operations across three risk classes — enough to exercise the whole
