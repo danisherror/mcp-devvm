@@ -33,7 +33,14 @@ from pathlib import Path
 
 from server.approvals.store import Approval, ApprovalStore
 from common.approval_sig import approver_user, effect_hash, required_approvers, sign_approval
-from scripts.approver_keys import current_approver_name, list_approvers, load_private_key
+from scripts.approver_keys import (
+    TRUSTED_PUBLIC_DIR,
+    current_approver_name,
+    enrolled_key_matches,
+    list_approvers,
+    load_private_key,
+    trusted_key_path,
+)
 from server.auth.principal import resolve_local_principal
 from server.proposals.engine import recompute_proposal_hash
 
@@ -111,8 +118,11 @@ def _my_approver_name() -> str:
         print(str(exc), file=sys.stderr)
         raise SystemExit(1) from exc
     if name not in list_approvers():
-        print(f"no approver key for OS user '{name}' -- create one with: python -m scripts.approver_keys init",
-              file=sys.stderr)
+        print(f"no approver key for OS user '{name}' -- create one with: approver-keys init", file=sys.stderr)
+        raise SystemExit(1)
+    if not trusted_key_path(name).is_file():
+        print(f"your approver key isn't enrolled in {TRUSTED_PUBLIC_DIR}, so devd would refuse the signature -- "
+              "run: sudo /opt/mcp-devvm-approve/bin/approver-keys enroll", file=sys.stderr)
         raise SystemExit(1)
     return name
 
@@ -163,6 +173,10 @@ async def _approve(store: ApprovalStore, approval_id: str) -> None:
     except (ValueError, TypeError):
         print("wrong passphrase -- not approved", file=sys.stderr)
         raise SystemExit(1) from None
+    if not enrolled_key_matches(approver_name, key):
+        print(f"your private key doesn't match the one enrolled in {TRUSTED_PUBLIC_DIR} -- not approved "
+              "(re-enroll with: sudo /opt/mcp-devvm-approve/bin/approver-keys enroll --replace)", file=sys.stderr)
+        raise SystemExit(1)
 
     signed = sign_approval(
         key, approver=approver_name, approval_id=approval.id,

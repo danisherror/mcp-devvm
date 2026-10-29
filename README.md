@@ -59,19 +59,25 @@ approver's signature over the exact proposal before doing anything.
 ```bash
 uv venv .venv && uv pip install --python .venv/bin/python -e ".[dev]"
 
+# Install a root-owned copy of the approval CLI that the agent can't edit
+# (it asks you to confirm the git commit it installs from), and create
+# /etc/mcp-devvm/approvers/, the root-owned directory of approver public
+# keys that devd trusts.
+sudo scripts/install_decide.sh
+
 # Build + start the demo dev-VM container, mint the CA and token-signing
 # keys, and pin the container's real sshd host key into config/targets.yaml.
 .venv/bin/python scripts/setup_dev_vm.py
 
-# Install a root-owned copy of the approval CLI that the agent can't edit
-# (it asks you to confirm the git commit it installs from).
-sudo scripts/install_decide.sh
-
 # Create your approver key. It's named after your OS user, one per user.
 # You pick a passphrase; it's never stored, and you'll type it each time
-# you approve something. devd trusts the public half
-# (data/approvers/public/ is mounted into the VM).
+# you approve something.
 /opt/mcp-devvm-approve/bin/approver-keys init
+
+# Enroll it, so devd trusts it. This needs root because the trusted key
+# directory must not be writable by you (or an agent running as you). It
+# asks for your passphrase to prove the key is yours.
+sudo /opt/mcp-devvm-approve/bin/approver-keys enroll
 
 # Run the MCP server (stdio transport) -- wire this into Claude Code / any
 # MCP client the same way you would any other stdio server:
@@ -275,9 +281,15 @@ the live container and is covered by a passing test:
 ```bash
 .venv/bin/python -m pytest tests/unit -q          # pure logic, no infra
 .venv/bin/python -m pytest tests/adversarial -q   # isolation/structural gates
-.venv/bin/python scripts/setup_dev_vm.py           # (if not already up)
+.venv/bin/python scripts/setup_dev_vm.py --test-approvers
 .venv/bin/python -m pytest tests/integration -q   # against the live container
 ```
+
+The integration tests trust throwaway approver keys by writing them into
+devd's key directory, so they need a VM set up with `--test-approvers`,
+which mounts a directory your user can write. Don't use that VM with an
+agent connected. Against a normal VM, the tests that approve something
+are skipped.
 
 ## Project layout
 
@@ -312,11 +324,12 @@ tests/             unit, adversarial (isolation/structural), integration
   can edit, so a hardware key or a separate OS account for approving is
   stronger. Use a strong passphrase: the encrypted key file can be copied
   and attacked offline.
-- **The agent can add its own approver public key.** `data/approvers/public/`
-  is writable by your OS user and devd reads it live, so an agent that can
-  write files can drop in a key it controls and sign its own approvals.
-  Until enrollment moves somewhere root-owned (TODO.md), don't give an
-  agent file-write access to this repo's `data/` directory.
+- **Enrolling approvers needs root.** devd only trusts public keys in
+  the root-owned `/etc/mcp-devvm/approvers/`, so an agent running as you
+  can't add one of its own. Adding a person means `sudo approver-keys
+  enroll`; revoking one means `sudo rm /etc/mcp-devvm/approvers/<user>.pub`.
+  Keys from before this change in `data/approvers/public/` are no longer
+  trusted: enroll them again.
 - **Multiple users and targets need some setup by hand.** Add users to
   `config/roles.yaml` and give each approver their own key; add targets to
   `config/targets.yaml` and `config/policy.yaml`. The agent passes

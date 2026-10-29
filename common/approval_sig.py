@@ -15,8 +15,9 @@ write them. So neither one can be what proves a human said yes. Instead:
     signatures. No valid signature means nothing runs.
 
 Each approver key belongs to exactly one OS user: the key is named after
-the user (`alice.pub` is user `os:alice`), and `approver_keys init` only
-creates a key for the user running it. That gives four-eyes two rules devd
+the user (`alice.pub` is user `os:alice`), `approver_keys init` only
+creates a key for the user running it, and only root can enroll a key into
+the directory devd trusts. That gives four-eyes two rules devd
 can check on its own:
   - two approvals means two different users, not two keys of one person;
   - the requester can't be one of them. The requester is bound into the

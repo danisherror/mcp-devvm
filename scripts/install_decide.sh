@@ -13,6 +13,9 @@
 #     /opt/mcp-devvm-approve/bin/decide         replaces python -m server.approvals.decide
 #     /opt/mcp-devvm-approve/bin/approver-keys  replaces python -m scripts.approver_keys
 #
+# It also creates /etc/mcp-devvm/approvers, the root-owned directory of
+# approver public keys that devd trusts (filled by `approver-keys enroll`).
+#
 # The launchers run Python in isolated mode (-I), so the repo, PYTHONPATH
 # and your user site-packages are never on the import path. They still read
 # data/ (the approval DB and your encrypted key) from the repo.
@@ -30,6 +33,7 @@ PREFIX=${MCP_DECIDE_PREFIX:-/opt/mcp-devvm-approve}
 PYTHON=${MCP_DECIDE_PYTHON:-/usr/bin/python3}
 REF=${1:-HEAD}
 REPO=$(cd "$(dirname "$0")/.." && pwd -P)
+KEYS_DIR=/etc/mcp-devvm/approvers
 
 # Pinned and wheel-only, so pip never runs a package's build script as root.
 DEPS="cryptography==50.0.1 aiosqlite==0.22.1 pyyaml==6.0.3"
@@ -117,8 +121,19 @@ chmod -R go-w "$STAGE"
 rm -rf "$PREFIX"
 mv "$STAGE" "$PREFIX"
 
+# The approver public keys devd trusts (scripts/approver_keys.py enroll).
+# Root-owned so an agent running as you can't add a key of its own. Kept
+# across reinstalls.
+if [ "${MCP_DECIDE_TEST:-}" != 1 ]; then
+  mkdir -p "$KEYS_DIR"
+  chown 0:0 "$KEYS_DIR"
+  chmod 755 "$KEYS_DIR"
+  check_root_owned "$(cd "$KEYS_DIR" && pwd -P)"
+fi
+
 echo
 echo "Installed to $PREFIX. Use these instead of the repo copies:"
 echo "  $PREFIX/bin/decide list | show <id> | approve <id> | deny <id>"
 echo "  $PREFIX/bin/approver-keys init | list"
+echo "  sudo $PREFIX/bin/approver-keys enroll     (makes devd trust your key)"
 echo "Type the full path rather than relying on PATH or an alias, which the agent can change."

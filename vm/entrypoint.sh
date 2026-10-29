@@ -18,7 +18,7 @@ else
 fi
 
 if [ -z "$(ls /etc/devd/approvers/*.pub 2>/dev/null)" ]; then
-  echo "[entrypoint] NOTE: no approver keys in /etc/devd/approvers yet -- operations that need approval will be refused until one is added (python -m scripts.approver_keys init)" >&2
+  echo "[entrypoint] NOTE: no approver keys in /etc/devd/approvers yet -- operations that need approval will be refused until one is enrolled (sudo /opt/mcp-devvm-approve/bin/approver-keys enroll)" >&2
 fi
 
 if [ ! -f /etc/devd/token_signing_key.pub ]; then

@@ -5,7 +5,6 @@ are in [ROADMAP.md](./ROADMAP.md).
 
 ## Security gaps (fix first)
 
-- [ ] **The agent can enroll its own approver key.** `data/approvers/public/` is writable by your OS user and devd reads it live, so an agent that can write files can add `mallory.pub` and sign its own approvals, which bypasses signatures entirely. Move the public keys to a root-owned directory (e.g. under `/opt/mcp-devvm-approve`), make enrolling a key a `sudo` step, and mount that directory into the VM instead.
 - [ ] **The protected `decide` still runs in your shell.** `scripts/install_decide.sh` stops repo edits from reaching the CLI, but an agent can edit your shell startup files (e.g. define a function named `/opt/mcp-devvm-approve/bin/decide`). A hardware key / passkey, or approving from a separate OS account, closes this. (ROADMAP Known gap #4)
 
 ## Bugs (fix before enabling four-eyes)
@@ -47,6 +46,7 @@ are in [ROADMAP.md](./ROADMAP.md).
 
 ## Done
 
+- [x] Approver keys are enrolled by root: devd trusts only the root-owned `/etc/mcp-devvm/approvers/`, `sudo approver-keys enroll` derives the public key from the passphrase-unlocked private key, and `setup_dev_vm.py` refuses a user-writable key directory (except `--test-approvers`).
 - [x] Root-owned copy of the approval CLI: `sudo scripts/install_decide.sh` installs `decide` and `approver-keys` from a reviewed commit into `/opt/mcp-devvm-approve`, run with `python -I`.
 - [x] Four-eyes counts people: approver keys are named after one OS user, one key per user.
 - [x] No self-approval on four-eyes: devd refuses a signature from the requester's key (`self_approval`), and `decide` and the store refuse it first.

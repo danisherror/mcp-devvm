@@ -88,11 +88,14 @@ gap discovered later. Both are called out again below because the
    on its own. `sudo scripts/install_decide.sh` installs a root-owned copy
    of the CLI from a reviewed commit, run in isolated mode, so editing the
    repo no longer changes the code that asks for the passphrase.
-   **Still open:** that copy runs as your OS user, in a shell whose
-   startup files the agent can edit; and `data/approvers/public/` is
-   writable by your OS user, so an agent can enroll a key of its own
-   (TODO.md). A hardware key or a separate approver OS account closes
-   both. Original
+   Approver public keys now live in the root-owned
+   `/etc/mcp-devvm/approvers/`, filled by `sudo approver-keys enroll`
+   (which proves possession with the passphrase), so an agent can't
+   enroll a key of its own; `scripts/setup_dev_vm.py` refuses to mount a
+   directory a non-root user can write, except with `--test-approvers`.
+   **Still open:** the CLI runs as your OS user, in a shell whose startup
+   files the agent can edit (TODO.md). A hardware key or a separate
+   approver OS account closes this. Original
    finding, for context: found in review, not by testing. `server/approvals/decide.py` runs as
    the same OS user as the MCP server, and `data/approvals.db` is
    readable and writable by that user. Any agent with a terminal tool can

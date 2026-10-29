@@ -7,6 +7,7 @@ Run: python scripts/setup_dev_vm.py && pytest tests/integration -q
 
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 import time
@@ -56,7 +57,13 @@ pytestmark = pytest.mark.skipif(
 )
 
 
-APPROVERS_PUBLIC = ROOT / "data" / "approvers" / "public"
+def _mounted_approvers_dir() -> Path | None:
+    out = subprocess.run(
+        ["docker", "inspect", CONTAINER, "--format",
+         '{{range .Mounts}}{{if eq .Destination "/etc/devd/approvers"}}{{.Source}}{{end}}{{end}}'],
+        capture_output=True, text=True,
+    ).stdout.strip()
+    return Path(out) if out else None
 
 
 @pytest.fixture
@@ -64,11 +71,16 @@ def approver():
     """A throwaway approver key, trusted by the running devd only for the
     length of one test: the public half goes into the mounted approvers
     directory and is removed afterwards; the private half never leaves
-    memory."""
+    memory. That only works when the VM was set up with --test-approvers;
+    the normal, root-owned directory refuses it, as it should, and then
+    only the tests that approve something are skipped."""
+    approvers_public = _mounted_approvers_dir()
+    if approvers_public is None or not os.access(approvers_public, os.W_OK):
+        yield None
+        return
     name = f"pytest-{uuid.uuid4().hex[:8]}"
     key = Ed25519PrivateKey.generate()
-    APPROVERS_PUBLIC.mkdir(parents=True, exist_ok=True)
-    pub = APPROVERS_PUBLIC / f"{name}.pub"
+    pub = approvers_public / f"{name}.pub"
     pub.write_bytes(key.public_key().public_bytes(
         serialization.Encoding.PEM, serialization.PublicFormat.SubjectPublicKeyInfo))
     yield name, key
@@ -134,6 +146,9 @@ _APPROVER = None
 async def _approve(store: ApprovalStore, approval_id: str) -> None:
     """What `decide approve` does, minus the prompts: recompute the hash
     from the stored fields and sign it with the approver key."""
+    if _APPROVER is None:
+        pytest.skip("devd's approver key directory isn't writable (the secure setup) -- "
+                    "recreate the VM with: python scripts/setup_dev_vm.py --test-approvers")
     name, key = _APPROVER
     approval = await store.get(approval_id)
     h = recompute_proposal_hash(approval)

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+from pathlib import Path
 
 import jwt
 import pytest
@@ -18,7 +19,14 @@ from common.approval_sig import (
     sign_approval,
     verify_approvals,
 )
-from scripts.approver_keys import create_approver_key, current_approver_name, load_private_key
+from scripts.approver_keys import (
+    create_approver_key,
+    current_approver_name,
+    enroll_approver_key,
+    enrolled_key_matches,
+    load_private_key,
+    untrusted_dir_reason,
+)
 
 APPROVAL_ID = "appr_0123456789abcdef"
 PHASH = "a" * 64
@@ -118,11 +126,48 @@ class TestVerify:
 
 class TestKeyFiles:
     def test_roundtrip_with_passphrase(self, tmp_path):
+        trusted = tmp_path / "trusted"
         create_approver_key("alice", "correct horse battery", tmp_path)
+        enroll_approver_key("alice", "correct horse battery", base=tmp_path, trusted=trusted)
         key = load_private_key("alice", "correct horse battery", tmp_path)
-        assert set(load_public_keys(tmp_path / "public")) == {"alice"}
+        assert set(load_public_keys(trusted)) == {"alice"}
+        assert enrolled_key_matches("alice", key, trusted)
         signed = sign_approval(key, approver="alice", approval_id=APPROVAL_ID, proposal_hash=PHASH, effect_hash=EHASH)
-        assert _verify([signed.as_dict()], load_public_keys(tmp_path / "public")) == ["alice"]
+        assert _verify([signed.as_dict()], load_public_keys(trusted)) == ["alice"]
+
+    def test_init_does_not_make_the_key_trusted(self, tmp_path):
+        create_approver_key("alice", "correct horse battery", tmp_path)
+        assert list(tmp_path.rglob("*.pub")) == []
+
+    def test_enroll_needs_the_passphrase(self, tmp_path):
+        create_approver_key("alice", "correct horse battery", tmp_path)
+        with pytest.raises(ValueError):
+            enroll_approver_key("alice", "wrong", base=tmp_path, trusted=tmp_path / "trusted")
+        assert not (tmp_path / "trusted" / "alice.pub").exists()
+
+    def test_enroll_derives_the_public_key_from_the_private_key(self, tmp_path, alice):
+        # A swapped .pub lying around in the repo doesn't get enrolled: the
+        # trusted key always comes from the key the passphrase unlocked.
+        (tmp_path / "public").mkdir()
+        (tmp_path / "public" / "alice.pub").write_bytes(alice.public_key().public_bytes(
+            serialization.Encoding.PEM, serialization.PublicFormat.SubjectPublicKeyInfo))
+        create_approver_key("alice", "correct horse battery", tmp_path)
+        enroll_approver_key("alice", "correct horse battery", base=tmp_path, trusted=tmp_path / "trusted")
+        mine = load_private_key("alice", "correct horse battery", tmp_path)
+        assert enrolled_key_matches("alice", mine, tmp_path / "trusted")
+        assert not enrolled_key_matches("alice", alice, tmp_path / "trusted")
+
+    def test_one_enrolled_key_per_user_unless_replaced(self, tmp_path):
+        trusted = tmp_path / "trusted"
+        create_approver_key("alice", "correct horse battery", tmp_path)
+        enroll_approver_key("alice", "correct horse battery", base=tmp_path, trusted=trusted)
+        with pytest.raises(FileExistsError):
+            enroll_approver_key("alice", "correct horse battery", base=tmp_path, trusted=trusted)
+        enroll_approver_key("alice", "correct horse battery", base=tmp_path, trusted=trusted, replace=True)
+
+    def test_user_writable_dir_is_not_trusted(self, tmp_path):
+        assert "not owned by root" in untrusted_dir_reason(tmp_path)
+        assert untrusted_dir_reason(Path("/usr/bin")) is None
 
     def test_wrong_passphrase_fails(self, tmp_path):
         create_approver_key("alice", "correct horse battery", tmp_path)
@@ -130,7 +175,7 @@ class TestKeyFiles:
             load_private_key("alice", "wrong", tmp_path)
 
     def test_private_key_is_encrypted_and_private(self, tmp_path):
-        priv, _pub = create_approver_key("alice", "correct horse battery", tmp_path)
+        priv = create_approver_key("alice", "correct horse battery", tmp_path)
         assert b"ENCRYPTED PRIVATE KEY" in priv.read_bytes()
         assert priv.stat().st_mode & 0o077 == 0
 
