@@ -71,6 +71,29 @@ gap discovered later. Both are called out again below because the
    `next(iter(targets.values()))`; `config/roles.yaml` has one entry. Real
    multi-user support needs the target-resolution and role-lookup paths
    generalized.
+4. **The agent can reach the approval channel in the local topology.**
+   Found in review, not by testing. `server/approvals/decide.py` runs as
+   the same OS user as the MCP server, and `data/approvals.db` is
+   readable and writable by that user. Any agent with a terminal tool can
+   approve its own request or rewrite the DB, which breaks B4 ("the
+   decision channel the agent cannot reach"). `devd` still limits this to
+   the shipped operations with valid params. Fix options, cheapest first:
+   - run the approval store and `decide.py` as a dedicated OS user, with
+     the DB at mode 0600 and the MCP server reaching it only through a
+     narrow local socket API that has no "approve" verb;
+   - require an approval signed by a key the agent can't read (hardware
+     key / passkey, or a phone confirmation), and have the executor verify
+     that signature instead of trusting a DB row;
+   - at minimum, state in the docs that the guarantee assumes an agent
+     with no shell access.
+   **Priority: highest. This is the core security promise.**
+5. **The proposal hash isn't recomputed at execution.**
+   `server/execution/executor.py` checks `approved_hash ==
+   proposal_hash`, but both are stored columns. It should recompute
+   `common.canonical.proposal_hash(...)` from the stored operation,
+   params, preconditions and manifest version, compare that to
+   `approved_hash`, and add a test that edits `params` in the DB after
+   approval and expects `UNAUTHORIZED`. Small fix: a few lines plus one test.
 
 ## Not started (Phase 6 — hardening)
 
@@ -106,7 +129,9 @@ Roughly in the order the doc itself suggests tackling them:
 
 ## Suggested next step
 
-If continuing this build, #1 above (wire the existing test suites into
-CI) is the highest-leverage next move — everything else in Phase 6 is
+First fix Known gaps #5 (hash recompute, small) and #4 (approval-channel
+isolation), because both undercut the core "human approves the exact
+thing that runs" guarantee. After that, #1 above (wire the existing test
+suites into CI) is the highest-leverage next move — everything else in Phase 6 is
 easier to get right with that safety net already in place, and it's the
 only item on this list that needs no new infrastructure to start.

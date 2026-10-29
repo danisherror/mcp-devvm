@@ -281,6 +281,21 @@ tests/             unit, adversarial (isolation/structural), integration
 
 ## Known limitations to know about before extending this
 
+- **The approval channel is only out-of-band if the agent has no shell.**
+  `decide.py` runs as your OS user and writes to `data/approvals.db`,
+  which your user can read and write. An agent that can run terminal
+  commands as you (Claude Code, VS Code agent mode, and others) could
+  run `decide approve` itself or edit the SQLite file. The blast radius
+  is still bounded, because `devd` independently re-validates the
+  operation and params, so the worst case is one of the four shipped
+  operations running without your consent, not arbitrary code. Until
+  this is fixed, run the agent without terminal access, or run the
+  approval store and CLI as a separate OS user. See ROADMAP, Known gaps #4.
+- **The executor doesn't recompute the proposal hash.**
+  `server/execution/executor.py` compares the stored `approved_hash`
+  against the stored `proposal_hash`, but never re-derives the hash from
+  the stored `params`/`preconditions`. If those fields are edited after
+  approval, nothing detects it. See ROADMAP, Known gaps #5.
 - Single target, single demo user, roles hardcoded to one principal in
   `config/roles.yaml` — extend that file and `server/main.py`'s
   single-target assumption before treating this as multi-tenant.
