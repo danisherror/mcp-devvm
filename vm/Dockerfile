@@ -16,15 +16,19 @@ FROM debian:bookworm-slim
 RUN sed -i 's|http://deb.debian.org|https://deb.debian.org|g' /etc/apt/sources.list.d/*.sources \
  && apt-get update -qq -o Acquire::https::Verify-Peer=false \
  && apt-get install -y -qq -o Acquire::https::Verify-Peer=false --no-install-recommends \
-      ca-certificates bubblewrap openssh-server git python3 python3-venv iptables \
+      ca-certificates bubblewrap openssh-server git python3 python3-venv iptables socat \
  && rm -rf /var/lib/apt/lists/*
 
 # devd's own account: unprivileged, no login shell, not in sudo/docker/disk/adm (§3.2).
 RUN useradd -m -s /usr/sbin/nologin -U devd
 
-# The tunnel account: forwarding-only, locked down further by
-# vm/sshd_config.d/devd-tunnel.conf (§9.4).
-RUN useradd -m -s /usr/sbin/nologin -U devd-tunnel
+# The tunnel account. Its login shell is devd-bridge, which can only pipe
+# bytes to devd's socket; vm/sshd_config.d/devd-tunnel.conf forces the same
+# command and turns off all forwarding (§9.4).
+COPY vm/bin/devd-bridge /usr/local/bin/devd-bridge
+RUN chown root:root /usr/local/bin/devd-bridge && chmod 0755 /usr/local/bin/devd-bridge \
+ && echo /usr/local/bin/devd-bridge >> /etc/shells \
+ && useradd -m -s /usr/local/bin/devd-bridge -U devd-tunnel
 
 RUN mkdir -p /run/devd /var/lib/devd/runs /etc/devd /etc/ssh/principals \
  && chown devd:devd /run/devd /var/lib/devd/runs

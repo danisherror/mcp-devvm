@@ -3,22 +3,30 @@
 Usage:
     python -m server.approvals.decide list
     python -m server.approvals.decide show <approval_id>
-    python -m server.approvals.decide approve <approval_id>
+    python -m server.approvals.decide approve <approval_id> [--approver NAME]
     python -m server.approvals.decide deny <approval_id> [--reason TEXT]
 
 This CLI is the out-of-band channel the agent cannot reach (B4). It reads
 and writes the same SQLite approval store the MCP server uses, so it must be
 run against the same `data/approvals.db` the server was started with.
+
+Approving needs the approver's passphrase (scripts/approver_keys.py). The
+CLI signs the exact proposal and effect text it just showed you; devd
+refuses to run anything that needs approval without that signature, so a
+row an agent writes into the DB by hand is not enough to run anything.
 """
 
 from __future__ import annotations
 
 import argparse
 import asyncio
+import getpass
 import sys
 from pathlib import Path
 
 from server.approvals.store import Approval, ApprovalStore
+from common.approval_sig import effect_hash, sign_approval
+from scripts.approver_keys import list_approvers, load_private_key
 from server.auth.principal import resolve_local_principal
 from server.proposals.engine import recompute_proposal_hash
 
@@ -87,7 +95,25 @@ async def _show(store: ApprovalStore, approval_id: str) -> None:
     print(_render(approval, rate_hint=f"rate: {recent} operation(s) proposed by this principal in the last 5 minutes"))
 
 
-async def _approve(store: ApprovalStore, approval_id: str, decided_by: str) -> None:
+def _pick_approver(requested: str | None) -> str:
+    names = list_approvers()
+    if requested:
+        if requested not in names:
+            print(f"no approver key named '{requested}' (have: {', '.join(names) or 'none'})", file=sys.stderr)
+            raise SystemExit(1)
+        return requested
+    if len(names) == 1:
+        return names[0]
+    if not names:
+        print("no approver key on this machine -- create one with: python -m scripts.approver_keys init",
+              file=sys.stderr)
+    else:
+        print(f"several approver keys found ({', '.join(names)}) -- pick one with --approver", file=sys.stderr)
+    raise SystemExit(1)
+
+
+async def _approve(store: ApprovalStore, approval_id: str, approver: str | None) -> None:
+    approver_name = _pick_approver(approver)
     approval = await store.get(approval_id)
     if approval is None:
         print(f"no such approval: {approval_id}", file=sys.stderr)
@@ -117,9 +143,22 @@ async def _approve(store: ApprovalStore, approval_id: str, decided_by: str) -> N
             print("aborted -- not approved")
             raise SystemExit(1)
 
+    passphrase = getpass.getpass(f"Passphrase for approver '{approver_name}': ")
+    try:
+        key = load_private_key(approver_name, passphrase)
+    except (ValueError, TypeError):
+        print("wrong passphrase -- not approved", file=sys.stderr)
+        raise SystemExit(1) from None
+
+    signed = sign_approval(
+        key, approver=approver_name, approval_id=approval.id,
+        proposal_hash=displayed_hash, effect_hash=effect_hash(approval.effect_summary),
+    )
+    # decided_by is the approver key, not the OS user: four-eyes counts
+    # distinct keys, which is also what devd counts.
     result = await store.record_decision(
-        approval_id=approval.id, decided_by=decided_by, decision="APPROVE",
-        displayed_hash=displayed_hash, channel="cli",
+        approval_id=approval.id, decided_by=f"approver:{approver_name}", decision="APPROVE",
+        displayed_hash=displayed_hash, channel="cli", signature=signed.as_dict(),
     )
     print(f"status: {result.status}")
     if result.status == "PENDING":
@@ -150,6 +189,7 @@ async def _main() -> None:
 
     p_approve = sub.add_parser("approve")
     p_approve.add_argument("approval_id")
+    p_approve.add_argument("--approver", default=None, help="approver key name (default: the only one)")
 
     p_deny = sub.add_parser("deny")
     p_deny.add_argument("approval_id")
@@ -166,7 +206,7 @@ async def _main() -> None:
         elif args.cmd == "show":
             await _show(store, args.approval_id)
         elif args.cmd == "approve":
-            await _approve(store, args.approval_id, principal.user_id)
+            await _approve(store, args.approval_id, args.approver)
         elif args.cmd == "deny":
             await _deny(store, args.approval_id, principal.user_id, args.reason)
     finally:

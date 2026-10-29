@@ -18,8 +18,9 @@ class Target:
     ssh_user: str
     host_key: str
     local_socket_path: str
-    remote_socket_path: str
     max_concurrent_runs: int
+    # Informational only: the VM's forced command decides where devd listens.
+    remote_socket_path: str = "/run/devd/devd.sock"
 
 
 def load_targets(path: Path) -> dict[str, Target]:
@@ -34,7 +35,7 @@ def load_targets(path: Path) -> dict[str, Target]:
             ssh_user=t["ssh_user"],
             host_key=t["host_key"],
             local_socket_path=t["local_socket_path"],
-            remote_socket_path=t["remote_socket_path"],
+            remote_socket_path=t.get("remote_socket_path", "/run/devd/devd.sock"),
             max_concurrent_runs=t.get("max_concurrent_runs", 3),
         )
     return targets

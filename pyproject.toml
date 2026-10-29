@@ -3,6 +3,7 @@ name = "mcp-devvm"
 version = "0.1.0"
 description = "Secure MCP dev-VM server: typed operations, approval gate, sandboxed execution"
 requires-python = ">=3.11"
+license = { text = "MIT" }
 dependencies = [
     "mcp>=2.0.0",
     "asyncssh>=2.24.0",

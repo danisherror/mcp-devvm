@@ -41,6 +41,11 @@ class PolicyMatrix:
                 continue
             yield rule
 
+    def can_see_target(self, principal: Principal, target_id: str) -> bool:
+        """A target is visible to a principal only if some rule grants them
+        something on it; others look exactly like targets that don't exist."""
+        return any(True for _ in self._matching_rules(principal, target_id))
+
     def allows(self, principal: Principal, target_id: str, op: OperationManifest) -> bool:
         if op.risk == "PRIVILEGE":
             return False  # ungrantable, no exceptions (§10.1)

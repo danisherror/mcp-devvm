@@ -22,7 +22,7 @@ def test_mcp_tool_surface_has_no_forbidden_parameters():
     tool_manager = mcp_app.mcp._tool_manager
     tools = tool_manager.list_tools()
     assert {t.name for t in tools} == {
-        "list_operations", "describe_target", "run_operation", "request_operation",
+        "list_targets", "list_operations", "describe_target", "run_operation", "request_operation",
         "check_run_status", "get_run_output", "list_my_pending_approvals",
     }
     for tool in tools:

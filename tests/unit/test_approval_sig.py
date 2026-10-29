@@ -1,0 +1,215 @@
+"""Signed human approvals (common/approval_sig.py) and devd's check of them."""
+
+from __future__ import annotations
+
+import time
+
+import jwt
+import pytest
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
+from common.approval_sig import (
+    ApprovalSignatureError,
+    effect_hash,
+    load_public_keys,
+    required_approvers,
+    sign_approval,
+    verify_approvals,
+)
+from scripts.approver_keys import create_approver_key, load_private_key
+
+APPROVAL_ID = "appr_0123456789abcdef"
+PHASH = "a" * 64
+EHASH = "b" * 64
+
+
+@pytest.fixture
+def alice():
+    return Ed25519PrivateKey.generate()
+
+
+@pytest.fixture
+def bob():
+    return Ed25519PrivateKey.generate()
+
+
+def _sign(key, name="alice", **kw):
+    args = dict(approver=name, approval_id=APPROVAL_ID, proposal_hash=PHASH, effect_hash=EHASH)
+    args.update(kw)
+    return sign_approval(key, **args).as_dict()
+
+
+def _verify(signed, keys, **kw):
+    args = dict(public_keys=keys, approval_id=APPROVAL_ID, proposal_hash=PHASH, effect_hash=EHASH, required=1)
+    args.update(kw)
+    return verify_approvals(signed, **args)
+
+
+class TestVerify:
+    def test_valid_signature_verifies(self, alice):
+        assert _verify([_sign(alice)], {"alice": alice.public_key()}) == ["alice"]
+
+    def test_no_signature_is_rejected(self, alice):
+        with pytest.raises(ApprovalSignatureError, match="required"):
+            _verify([], {"alice": alice.public_key()})
+
+    @pytest.mark.parametrize("field,value", [
+        ("approval_id", "appr_ffffffffffffffff"),
+        ("proposal_hash", "c" * 64),
+        ("effect_hash", "d" * 64),
+    ])
+    def test_signature_is_bound_to_each_field(self, alice, field, value):
+        with pytest.raises(ApprovalSignatureError, match="bad_approval_signature"):
+            _verify([_sign(alice)], {"alice": alice.public_key()}, **{field: value})
+
+    def test_unknown_approver_is_rejected(self, alice):
+        with pytest.raises(ApprovalSignatureError, match="unknown_approver"):
+            _verify([_sign(alice, name="mallory")], {"alice": alice.public_key()})
+
+    def test_signature_under_another_name_is_rejected(self, alice, bob):
+        # bob's key signing a statement that claims to be from alice
+        with pytest.raises(ApprovalSignatureError, match="bad_approval_signature"):
+            _verify([_sign(bob, name="alice")], {"alice": alice.public_key()})
+
+    def test_extended_expiry_is_rejected(self, alice):
+        signed = _sign(alice)
+        signed["not_after"] += 3600  # not_after is inside the signed statement
+        with pytest.raises(ApprovalSignatureError, match="bad_approval_signature"):
+            _verify([signed], {"alice": alice.public_key()})
+
+    def test_expired_signature_is_rejected(self, alice):
+        signed = _sign(alice, ttl_s=10, now=time.time() - 100)
+        with pytest.raises(ApprovalSignatureError, match="expired"):
+            _verify([signed], {"alice": alice.public_key()})
+
+    def test_four_eyes_needs_two_distinct_approvers(self, alice, bob):
+        keys = {"alice": alice.public_key(), "bob": bob.public_key()}
+        with pytest.raises(ApprovalSignatureError, match="required:2:got:1"):
+            _verify([_sign(alice), _sign(alice)], keys, required=2)
+        assert _verify([_sign(alice), _sign(bob, name="bob")], keys, required=2) == ["alice", "bob"]
+
+    def test_malformed_entry_is_rejected(self, alice):
+        with pytest.raises(ApprovalSignatureError, match="malformed"):
+            _verify([{"approver": "alice"}], {"alice": alice.public_key()})
+
+    def test_destructive_always_needs_two(self):
+        assert required_approvers("MUTATING_LOCAL") == 1
+        assert required_approvers("DESTRUCTIVE") == 2
+        assert required_approvers("PRIVILEGE", requested=1) == 2
+
+
+class TestKeyFiles:
+    def test_roundtrip_with_passphrase(self, tmp_path):
+        create_approver_key("alice", "correct horse battery", tmp_path)
+        key = load_private_key("alice", "correct horse battery", tmp_path)
+        assert set(load_public_keys(tmp_path / "public")) == {"alice"}
+        signed = sign_approval(key, approver="alice", approval_id=APPROVAL_ID, proposal_hash=PHASH, effect_hash=EHASH)
+        assert _verify([signed.as_dict()], load_public_keys(tmp_path / "public")) == ["alice"]
+
+    def test_wrong_passphrase_fails(self, tmp_path):
+        create_approver_key("alice", "correct horse battery", tmp_path)
+        with pytest.raises(ValueError):
+            load_private_key("alice", "wrong", tmp_path)
+
+    def test_private_key_is_encrypted_and_private(self, tmp_path):
+        priv, _pub = create_approver_key("alice", "correct horse battery", tmp_path)
+        assert b"ENCRYPTED PRIVATE KEY" in priv.read_bytes()
+        assert priv.stat().st_mode & 0o077 == 0
+
+    def test_empty_passphrase_and_bad_names_refused(self, tmp_path):
+        with pytest.raises(ValueError):
+            create_approver_key("alice", "", tmp_path)
+        with pytest.raises(ValueError):
+            create_approver_key("../evil", "correct horse battery", tmp_path)
+
+
+class TestDevdEnforcement:
+    """devd's /run endpoint must refuse approval-required operations without
+    a valid human signature, even when the server token itself is valid --
+    that token's signing key is readable by anything on the server host."""
+
+    @pytest.fixture
+    def client(self, tmp_path, monkeypatch):
+        from fastapi.testclient import TestClient
+
+        import devd.auth
+        from devd import app as devd_app
+        from devd import config
+
+        token_key = Ed25519PrivateKey.generate()
+        monkeypatch.setattr(devd.auth, "_public_key", token_key.public_key())
+        approvers = tmp_path / "approvers"
+        approvers.mkdir()
+        monkeypatch.setattr(config, "APPROVERS_DIR", approvers)
+        return TestClient(devd_app.app), token_key, approvers
+
+    @staticmethod
+    def _token(key, *, operation_id="git.checkout", approval_id=APPROVAL_ID):
+        from devd import config
+
+        return jwt.encode({
+            "sub": "os:someone", "approval_id": approval_id, "operation_id": operation_id,
+            "manifest_ver": 1, "aud": config.AUDIENCE_PREFIX + config.TARGET_ID, "exp": int(time.time()) + 60,
+        }, key, algorithm="EdDSA")
+
+    @staticmethod
+    def _body(**extra):
+        from devd.app import registry
+
+        op = registry.get("git.checkout")
+        body = {"params": {"repo": "api", "branch": "main"}, "preconditions": {},
+                "manifest_version": op.version, "manifest_hash": op.content_hash}
+        body.update(extra)
+        return body
+
+    def test_valid_token_without_signature_is_refused(self, client):
+        c, token_key, _ = client
+        resp = c.post("/operations/git.checkout/run", json=self._body(),
+                      headers={"Authorization": f"Bearer {self._token(token_key)}", "Idempotency-Key": APPROVAL_ID})
+        assert resp.status_code == 403
+        assert resp.json()["detail"].startswith("approval_signature_invalid")
+
+    def test_non_approval_token_is_refused(self, client):
+        c, token_key, _ = client
+        tok = self._token(token_key, approval_id="n/a:direct-read")
+        resp = c.post("/operations/git.checkout/run", json=self._body(),
+                      headers={"Authorization": f"Bearer {tok}", "Idempotency-Key": "direct_x"})
+        assert resp.status_code == 403
+        assert resp.json()["detail"] == "approval_required"
+
+    def test_signature_for_different_params_is_refused(self, client):
+        from devd.app import PROPOSAL_SCHEMA_VERSION, registry
+        from devd import config
+        from common.canonical import proposal_hash
+
+        c, token_key, approvers = client
+        human = Ed25519PrivateKey.generate()
+        (approvers / "alice.pub").write_bytes(human.public_key().public_bytes(
+            serialization.Encoding.PEM, serialization.PublicFormat.SubjectPublicKeyInfo))
+        op = registry.get("git.checkout")
+        approved_params = {"repo": "api", "branch": "main"}
+        h = proposal_hash(v=PROPOSAL_SCHEMA_VERSION, principal="os:someone", target_id=config.TARGET_ID,
+                          operation_id=op.id, manifest_version=op.version, manifest_hash=op.content_hash,
+                          params=approved_params, preconditions={})
+        signed = sign_approval(human, approver="alice", approval_id=APPROVAL_ID, proposal_hash=h,
+                               effect_hash=effect_hash(op.effect.render(approved_params)))
+        # The human approved branch "main"; the request asks for another branch.
+        body = self._body(approvals=[signed.as_dict()])
+        body["params"] = {"repo": "api", "branch": "evil"}
+        resp = c.post("/operations/git.checkout/run", json=body,
+                      headers={"Authorization": f"Bearer {self._token(token_key)}", "Idempotency-Key": APPROVAL_ID})
+        assert resp.status_code == 403
+        assert "bad_approval_signature" in resp.json()["detail"]
+
+    def test_read_only_operation_needs_no_signature(self, client):
+        from devd.app import registry
+
+        c, token_key, _ = client
+        op = registry.get("git.status")
+        tok = self._token(token_key, operation_id="git.status", approval_id="n/a:direct-read")
+        resp = c.post("/operations/git.status/run",
+                      json={"params": {"repo": "api"}, "preconditions": {},
+                            "manifest_version": op.version, "manifest_hash": op.content_hash},
+                      headers={"Authorization": f"Bearer {tok}", "Idempotency-Key": "direct_y"})
+        assert resp.status_code != 403

@@ -20,6 +20,8 @@ from server.approvals.state_machine import ALL_STATES, TERMINAL_STATES, IllegalT
         ("RUNNING", "OP_FAILED"),
         ("RUNNING", "TIMED_OUT"),
         ("RUNNING", "UNKNOWN"),
+        ("RUNNING", "STALE"),
+        ("RUNNING", "UNAUTHORIZED"),
         ("UNKNOWN", "SUCCEEDED"),
         ("UNKNOWN", "OP_FAILED"),
         ("UNKNOWN", "TIMED_OUT"),

@@ -61,7 +61,7 @@ class OperationService:
         self,
         *,
         store: ApprovalStore,
-        target: Target,
+        targets: dict[str, Target],
         policy: PolicyMatrix,
         registry: RegistryClient,
         tunnel: TunnelManager,
@@ -71,8 +71,10 @@ class OperationService:
         reconciler: Reconciler,
         step_up: StepUpStore,
     ):
+        if not targets:
+            raise ValueError("at least one target is required")
         self._store = store
-        self._target = target
+        self._targets = targets
         self._policy = policy
         self._registry = registry
         self._tunnel = tunnel
@@ -82,17 +84,40 @@ class OperationService:
         self._reconciler = reconciler
         self._step_up = step_up
 
-    async def describe_target(self, principal: Principal) -> dict[str, Any]:
-        return {"label": self._target.label}
+    def _resolve_target(self, principal: Principal, target_id: str | None) -> Target:
+        """An omitted target_id means "the only target", so single-target
+        setups keep working without the agent naming one. With several
+        targets the agent must pick one by id; an id it isn't allowed to use
+        is reported exactly like one that doesn't exist."""
+        if target_id is None:
+            visible = self._visible_targets(principal)
+            if len(visible) == 1:
+                return visible[0]
+            raise ToolError("target_required:call list_targets and pass target_id")
+        target = self._targets.get(target_id)
+        if target is None or not self._policy.can_see_target(principal, target.id):
+            raise ToolError("unknown_target")
+        return target
 
-    async def list_operations(self, principal: Principal) -> list[dict[str, Any]]:
+    def _visible_targets(self, principal: Principal) -> list[Target]:
+        return [t for t in self._targets.values() if self._policy.can_see_target(principal, t.id)]
+
+    async def list_targets(self, principal: Principal) -> list[dict[str, Any]]:
+        return [{"target_id": t.id, "label": t.label} for t in self._visible_targets(principal)]
+
+    async def describe_target(self, principal: Principal, target_id: str | None = None) -> dict[str, Any]:
+        target = self._resolve_target(principal, target_id)
+        return {"target_id": target.id, "label": target.label}
+
+    async def list_operations(self, principal: Principal, target_id: str | None = None) -> list[dict[str, Any]]:
+        target = self._resolve_target(principal, target_id)
         try:
-            ops = await self._registry.refresh(self._target, principal.user_id)
+            ops = await self._registry.refresh(target, principal.user_id)
         except Exception as exc:  # noqa: BLE001
             raise ToolError("target_unavailable") from exc
         result = []
         for op in ops.values():
-            if not self._policy.allows(principal, self._target.id, op):
+            if not self._policy.allows(principal, target.id, op):
                 continue
             result.append({
                 "id": op.id,
@@ -105,16 +130,19 @@ class OperationService:
             })
         return result
 
-    async def run_operation(self, principal: Principal, operation_id: str, params: dict[str, Any]) -> dict[str, Any]:
+    async def run_operation(
+        self, principal: Principal, operation_id: str, params: dict[str, Any], target_id: str | None = None
+    ) -> dict[str, Any]:
         """READ_ONLY operations only, per the manifest's own `approval_required`
         flag -- no tool parameter can select this path for anything else."""
-        op = await self._registry.get(self._target, operation_id, principal.user_id, force_refresh=True)
+        target = self._resolve_target(principal, target_id)
+        op = await self._registry.get(target, operation_id, principal.user_id, force_refresh=True)
         if op is None:
             await self._audit.emit("OPERATION_UNAVAILABLE", operation_id=operation_id, principal_id=principal.user_id)
             raise ToolError("unknown_operation")
         if op.approval_required:
             raise ToolError("not_permitted:use request_operation for this operation")
-        if not self._policy.allows(principal, self._target.id, op):
+        if not self._policy.allows(principal, target.id, op):
             await self._audit.emit("POLICY_DENIED", operation_id=op.id, principal_id=principal.user_id, risk=op.risk)
             raise ToolError("not_permitted")
 
@@ -125,15 +153,15 @@ class OperationService:
 
         token = self._tokens.mint(
             sub=principal.user_id, approval_id="n/a:direct-read", operation_id=op.id,
-            manifest_version=op.version, audience=f"devd:{self._target.id}", ttl_seconds=60,
+            manifest_version=op.version, audience=f"devd:{target.id}", ttl_seconds=60,
         )
         try:
-            await self._tunnel.ensure_connected(self._target)
+            await self._tunnel.ensure_connected(target)
         except Exception as exc:  # noqa: BLE001
             raise ToolError("target_unavailable") from exc
 
         idem = "direct_" + uuid.uuid4().hex[:16]
-        async with client_for(self._target, timeout=op.sandbox.timeout_s + 10) as client:
+        async with client_for(target, timeout=op.sandbox.timeout_s + 10) as client:
             resp = await client.post(
                 f"/operations/{op.id}/run",
                 json={"params": validated, "preconditions": {}, "manifest_version": op.version, "manifest_hash": op.content_hash},
@@ -149,9 +177,11 @@ class OperationService:
         })
 
     async def request_operation(
-        self, principal: Principal, operation_id: str, params: dict[str, Any], reason: str
+        self, principal: Principal, operation_id: str, params: dict[str, Any], reason: str,
+        target_id: str | None = None,
     ) -> dict[str, Any]:
-        op = await self._registry.get(self._target, operation_id, principal.user_id, force_refresh=True)
+        target = self._resolve_target(principal, target_id)
+        op = await self._registry.get(target, operation_id, principal.user_id, force_refresh=True)
         if op is None:
             await self._audit.emit("OPERATION_UNAVAILABLE", operation_id=operation_id, principal_id=principal.user_id)
             raise ToolError("unknown_operation")
@@ -161,20 +191,20 @@ class OperationService:
         except InvalidParameter as exc:
             raise ToolError(f"invalid_parameter:{exc.name}:{exc.reason}") from exc
 
-        if not self._policy.allows(principal, self._target.id, op):
+        if not self._policy.allows(principal, target.id, op):
             await self._audit.emit("POLICY_DENIED", operation_id=op.id, principal_id=principal.user_id, risk=op.risk)
             raise ToolError("not_permitted")
 
-        if self._policy.requires_step_up(principal, self._target.id, op):
+        if self._policy.requires_step_up(principal, target.id, op):
             last = self._step_up.last_auth_time(principal.user_id)
             if time.time() - last > STEP_UP_MAX_AGE_S:
                 raise ToolError("reauthentication_required")
 
-        limit = self._policy.max_runs_per_hour(principal, self._target.id)
+        limit = self._policy.max_runs_per_hour(principal, target.id)
         if limit:
-            recent = await self._store.count_recent(principal.user_id, self._target.id, since_seconds=3600)
+            recent = await self._store.count_recent(principal.user_id, target.id, since_seconds=3600)
             if recent >= limit:
-                await self._audit.emit("SECURITY_RATE_LIMITED", principal_id=principal.user_id, target_id=self._target.id)
+                await self._audit.emit("SECURITY_RATE_LIMITED", principal_id=principal.user_id, target_id=target.id)
                 raise ToolError("rate_limited")
 
         # Preconditions: cannot capture => do not propose (fail closed, §19).
@@ -182,11 +212,11 @@ class OperationService:
         if op.preconditions:
             pre_token = self._tokens.mint(
                 sub=principal.user_id, approval_id="n/a:preconditions", operation_id=op.id,
-                manifest_version=op.version, audience=f"devd:{self._target.id}", ttl_seconds=60,
+                manifest_version=op.version, audience=f"devd:{target.id}", ttl_seconds=60,
             )
             try:
-                await self._tunnel.ensure_connected(self._target)
-                async with client_for(self._target, timeout=15) as client:
+                await self._tunnel.ensure_connected(target)
+                async with client_for(target, timeout=15) as client:
                     resp = await client.post(
                         "/preconditions", json={"operation_id": op.id, "params": validated},
                         headers={"Authorization": f"Bearer {pre_token}"},
@@ -199,11 +229,11 @@ class OperationService:
 
         from server.proposals.engine import build_proposal
 
-        proposal = build_proposal(principal=principal, target=self._target, op=op, params=validated, preconditions=preconditions)
-        four_eyes = self._policy.requires_four_eyes(principal, self._target.id, op)
+        proposal = build_proposal(principal=principal, target=target, op=op, params=validated, preconditions=preconditions)
+        four_eyes = self._policy.requires_four_eyes(principal, target.id, op)
 
         approval = await self._store.create(
-            principal_id=principal.user_id, request_id=str(uuid.uuid4()), target_id=self._target.id,
+            principal_id=principal.user_id, request_id=str(uuid.uuid4()), target_id=target.id,
             operation_id=op.id, manifest_version=op.version, manifest_hash=op.content_hash, params=validated,
             preconditions=preconditions, risk_class=op.risk, effect_summary=proposal.effect, reason=reason,
             proposal_hash=proposal.hash, approvals_required=2 if four_eyes else 1,
@@ -215,6 +245,7 @@ class OperationService:
         )
         return {
             "approval_id": approval.id,
+            "target_id": target.id,
             "status": "PENDING",
             "operation": op.id,
             "params": validated,
@@ -230,19 +261,23 @@ class OperationService:
             raise ToolError("not_permitted")
         return {
             "approval_id": approval.id,
+            "target_id": approval.target_id,
             "status": approval.status,
             "run_id": approval.run_id,
             "outcome": approval.outcome,
             "error_code": approval.error_code,
         }
 
-    async def get_run_output(self, principal: Principal, run_id: str, offset: int, limit: int) -> dict[str, Any]:
+    async def get_run_output(
+        self, principal: Principal, run_id: str, offset: int, limit: int, target_id: str | None = None
+    ) -> dict[str, Any]:
+        target = self._resolve_target(principal, target_id)
         token = self._tokens.mint(
             sub=principal.user_id, approval_id="n/a:read-output", operation_id="__discovery__",
-            manifest_version=0, audience=f"devd:{self._target.id}", ttl_seconds=60,
+            manifest_version=0, audience=f"devd:{target.id}", ttl_seconds=60,
         )
-        await self._tunnel.ensure_connected(self._target)
-        async with client_for(self._target, timeout=15) as client:
+        await self._tunnel.ensure_connected(target)
+        async with client_for(target, timeout=15) as client:
             resp = await client.get(
                 f"/runs/{run_id}/output", params={"offset": offset, "limit": limit},
                 headers={"Authorization": f"Bearer {token}"},
@@ -262,6 +297,7 @@ class OperationService:
     async def list_my_pending_approvals(self, principal: Principal) -> list[dict[str, Any]]:
         approvals = await self._store.list_pending_for(principal.user_id)
         return [
-            {"approval_id": a.id, "operation_id": a.operation_id, "risk": a.risk_class, "expires_at": a.expires_at}
+            {"approval_id": a.id, "target_id": a.target_id, "operation_id": a.operation_id,
+             "risk": a.risk_class, "expires_at": a.expires_at}
             for a in approvals
         ]

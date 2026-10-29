@@ -29,10 +29,26 @@ def sh(cmd: list[str], **kw) -> subprocess.CompletedProcess:
     return subprocess.run(cmd, check=True, **kw)
 
 
+def _observed_source_address() -> str | None:
+    for _ in range(10):
+        log = subprocess.run(
+            ["docker", "exec", CONTAINER, "cat", "/var/log/sshd.log"], capture_output=True, text=True,
+        ).stdout
+        found = re.findall(r"Connection from (\S+) port \d+", log)
+        if found:
+            return found[-1]
+        time.sleep(0.5)
+    return None
+
+
 def main() -> None:
     (DATA / "ca").mkdir(parents=True, exist_ok=True)
     (DATA / "keys").mkdir(parents=True, exist_ok=True)
     (DATA / "sockets").mkdir(parents=True, exist_ok=True)
+    # Approver public keys are mounted as a directory, read live by devd, so
+    # keys created later with `python -m scripts.approver_keys init` work
+    # without recreating the container.
+    (DATA / "approvers" / "public").mkdir(parents=True, exist_ok=True)
 
     init_ca(DATA / "ca")
     ensure_token_signing_keypair(DATA / "keys" / "token_signing_key.pem", DATA / "keys" / "token_signing_key.pub")
@@ -52,6 +68,7 @@ def main() -> None:
         "-p", f"{SSH_PORT}:22",
         "-v", f"{DATA / 'ca' / 'ca_key.pub'}:/etc/devd/ca.pub:ro",
         "-v", f"{DATA / 'keys' / 'token_signing_key.pub'}:/etc/devd/token_signing_key.pub:ro",
+        "-v", f"{DATA / 'approvers' / 'public'}:/etc/devd/approvers:ro",
         IMAGE,
     ])
 
@@ -79,13 +96,14 @@ def main() -> None:
     targets_path.write_text(text)
 
     # The container is reached through Docker's published-port NAT, so sshd
-    # sees connections arriving from the bridge network's gateway address,
-    # not literally 127.0.0.1. The tunnel certificate's source-address
+    # doesn't see 127.0.0.1. The tunnel certificate's source-address
     # restriction (doc §9.4) has to match what sshd actually observes, or
     # every connection is refused ("not from a permitted source address").
-    # A real (non-containerized, non-NATed) deployment would pin this to the
-    # MCP server's actual egress IP instead.
-    gw = subprocess.run(
+    # That address differs by platform (the bridge gateway on Linux,
+    # 192.168.65.x on Docker Desktop), so read it from sshd's own log of
+    # the ssh-keyscan connection above instead of guessing. A real
+    # (non-NATed) deployment pins the MCP server's actual egress IP.
+    gw = _observed_source_address() or subprocess.run(
         ["docker", "inspect", CONTAINER, "--format", "{{range .NetworkSettings.Networks}}{{.Gateway}}{{end}}"],
         capture_output=True, text=True, check=True,
     ).stdout.strip()
@@ -94,6 +112,11 @@ def main() -> None:
     print(f"\ndev VM is up: container={CONTAINER} ssh_port={SSH_PORT}")
     print(f"host key pinned in {targets_path}")
     print(f"tunnel source-address pinned to {gw or '127.0.0.1'}")
+    from scripts.approver_keys import list_approvers
+
+    if not list_approvers():
+        print("\nNo approver key yet. Create one (you'll pick a passphrase):")
+        print("  python -m scripts.approver_keys init")
     print("\nNext: python -m server.main")
 
 

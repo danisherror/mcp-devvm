@@ -61,7 +61,6 @@ async def build() -> tuple[ApprovalStore, TunnelManager, Reconciler, Dispatcher]
 
     if not targets:
         raise RuntimeError(f"no targets configured in {CONFIG_DIR / 'targets.yaml'}")
-    target = next(iter(targets.values()))  # single-target demo (§9.2 simplification)
 
     store = ApprovalStore(DATA_DIR / "approvals.db")
     await store.open()
@@ -87,7 +86,7 @@ async def build() -> tuple[ApprovalStore, TunnelManager, Reconciler, Dispatcher]
     dispatcher.start()
 
     service = OperationService(
-        store=store, target=target, policy=policy, registry=registry, tunnel=tunnel,
+        store=store, targets=targets, policy=policy, registry=registry, tunnel=tunnel,
         tokens=tokens, audit=audit, executor=executor, reconciler=reconciler, step_up=step_up,
     )
     mcp_app.bind(service, role_map)

@@ -57,6 +57,7 @@ CREATE TABLE IF NOT EXISTS approval_decisions (
   decided_at     REAL NOT NULL,
   displayed_hash TEXT NOT NULL,
   channel        TEXT NOT NULL,
+  signature      TEXT,
   UNIQUE (approval_id, decided_by)
 );
 """
@@ -124,7 +125,15 @@ class ApprovalStore:
         self._db.row_factory = aiosqlite.Row
         await self._db.execute("PRAGMA journal_mode=WAL")
         await self._db.executescript(SCHEMA)
+        await self._migrate()
         await self._db.commit()
+
+    async def _migrate(self) -> None:
+        # Stores created before signed approvals existed lack this column.
+        cur = await self.db.execute("PRAGMA table_info(approval_decisions)")
+        columns = {row["name"] for row in await cur.fetchall()}
+        if "signature" not in columns:
+            await self.db.execute("ALTER TABLE approval_decisions ADD COLUMN signature TEXT")
 
     async def close(self) -> None:
         if self._db:
@@ -174,8 +183,12 @@ class ApprovalStore:
         return [Approval.from_row(r) for r in rows]
 
     async def record_decision(
-        self, *, approval_id: str, decided_by: str, decision: str, displayed_hash: str, channel: str
+        self, *, approval_id: str, decided_by: str, decision: str, displayed_hash: str, channel: str,
+        signature: dict[str, Any] | None = None,
     ) -> Approval:
+        """`signature` is the approver's SignedApproval (common/approval_sig.py).
+        The store doesn't verify it -- devd does, at execution time, because
+        anything on this host can write this table."""
         approval = await self.get(approval_id)
         if approval is None:
             raise KeyError(approval_id)
@@ -189,8 +202,9 @@ class ApprovalStore:
         try:
             await self.db.execute(
                 "INSERT INTO approval_decisions (id, approval_id, decided_by, decision, decided_at, "
-                "displayed_hash, channel) VALUES (?,?,?,?,?,?,?)",
-                (decision_id, approval_id, decided_by, decision, time.time(), displayed_hash, channel),
+                "displayed_hash, channel, signature) VALUES (?,?,?,?,?,?,?,?)",
+                (decision_id, approval_id, decided_by, decision, time.time(), displayed_hash, channel,
+                 json.dumps(signature) if signature is not None else None),
             )
             await self.db.commit()
         except aiosqlite.IntegrityError:
@@ -225,6 +239,14 @@ class ApprovalStore:
         result = await self.get(approval_id)
         assert result is not None
         return result
+
+    async def signatures_for(self, approval_id: str) -> list[dict[str, Any]]:
+        cur = await self.db.execute(
+            "SELECT signature FROM approval_decisions WHERE approval_id = ? AND decision = 'APPROVE' "
+            "AND signature IS NOT NULL ORDER BY decided_at",
+            (approval_id,),
+        )
+        return [json.loads(row["signature"]) for row in await cur.fetchall()]
 
     async def _set_status_unchecked(self, approval_id: str, status: str) -> None:
         await self.db.execute("UPDATE approvals SET status=? WHERE id=?", (status, approval_id))

@@ -1,12 +1,20 @@
 """The ONLY module that opens an SSH connection (doc §24 review rule).
 
-One long-lived tunnel per target: connect on demand, pin the host key,
-forward a local unix socket to devd's remote unix socket, reconnect with
-backoff. Never falls back to a direct connection or to SSH exec.
+One long-lived SSH connection per target: connect on demand, pin the host
+key, and serve a local unix socket. Each connection to that local socket
+gets its own SSH session on the VM, where the tunnel account's forced
+command (vm/bin/devd-bridge) pipes it to devd's unix socket.
+
+This replaced SSH port forwarding, which needed `PermitOpen any` on the VM
+and so let the tunnel account reach any TCP host:port (ROADMAP Known gap
+#1). The session's command string is ignored by the VM -- the forced
+command always runs -- so nothing sent here can choose what executes there.
+Never falls back to a direct connection.
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from pathlib import Path
 
@@ -16,6 +24,11 @@ from server.policy.targets import Target
 from server.tunnel.hostkeys import known_hosts_path
 
 logger = logging.getLogger("server.tunnel")
+
+# The VM ignores the requested command and always runs its forced command;
+# this string only shows up in sshd's logs.
+_SESSION_COMMAND = "devd-bridge"
+_CHUNK = 65536
 
 
 class TunnelError(Exception):
@@ -38,7 +51,7 @@ class TunnelManager:
         self._pin_dir = pin_dir
         self._cert_provider = cert_provider
         self._connections: dict[str, asyncssh.SSHClientConnection] = {}
-        self._listeners: dict[str, asyncssh.SSHListener] = {}
+        self._listeners: dict[str, asyncio.AbstractServer] = {}
 
     def is_up(self, target_id: str) -> bool:
         conn = self._connections.get(target_id)
@@ -76,15 +89,55 @@ class TunnelManager:
         if socket_path.exists():
             socket_path.unlink()
 
+        old_listener = self._listeners.pop(target.id, None)
+        if old_listener is not None:
+            old_listener.close()
+
         try:
-            listener = await conn.forward_local_path(str(socket_path), target.remote_socket_path)
-        except (asyncssh.Error, OSError) as exc:
+            listener = await asyncio.start_unix_server(
+                lambda r, w: self._bridge(conn, r, w), path=str(socket_path)
+            )
+            socket_path.chmod(0o600)
+        except OSError as exc:
             conn.close()
             raise TunnelDown(str(exc)) from exc
 
         self._connections[target.id] = conn
         self._listeners[target.id] = listener
-        logger.info("TUNNEL_UP target=%s local=%s remote=%s", target.id, socket_path, target.remote_socket_path)
+        logger.info("TUNNEL_UP target=%s local=%s", target.id, socket_path)
+
+    @staticmethod
+    async def _bridge(conn: asyncssh.SSHClientConnection, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        """Copy bytes both ways between one local connection and one SSH session."""
+        try:
+            proc = await conn.create_process(_SESSION_COMMAND, encoding=None)
+        except (asyncssh.Error, OSError) as exc:
+            logger.warning("TUNNEL_SESSION_FAILED error=%s", exc)
+            writer.close()
+            return
+
+        async def upstream() -> None:
+            try:
+                while data := await reader.read(_CHUNK):
+                    proc.stdin.write(data)
+                proc.stdin.write_eof()
+            except (asyncssh.Error, OSError, ConnectionError):
+                pass
+
+        async def downstream() -> None:
+            try:
+                while data := await proc.stdout.read(_CHUNK):
+                    writer.write(data)
+                    await writer.drain()
+            except (asyncssh.Error, OSError, ConnectionError):
+                pass
+            finally:
+                writer.close()
+
+        try:
+            await asyncio.gather(upstream(), downstream())
+        finally:
+            proc.close()
 
     async def close(self, target_id: str) -> None:
         if target_id in self._listeners:

@@ -17,6 +17,10 @@ else
   echo "[entrypoint] WARNING: no CA public key mounted at /etc/devd/ca.pub -- the tunnel account will not accept any certificate" >&2
 fi
 
+if [ -z "$(ls /etc/devd/approvers/*.pub 2>/dev/null)" ]; then
+  echo "[entrypoint] NOTE: no approver keys in /etc/devd/approvers yet -- operations that need approval will be refused until one is added (python -m scripts.approver_keys init)" >&2
+fi
+
 if [ ! -f /etc/devd/token_signing_key.pub ]; then
   echo "[entrypoint] WARNING: no token verification key mounted at /etc/devd/token_signing_key.pub -- devd will refuse every request" >&2
 fi
@@ -33,7 +37,7 @@ echo "[entrypoint] hardening..."
 
 echo "[entrypoint] starting sshd..."
 mkdir -p /run/sshd
-/usr/sbin/sshd -D &
+/usr/sbin/sshd -D -e 2>>/var/log/sshd.log &
 
 echo "[entrypoint] starting devd..."
 # `su` does not reliably forward an exported environment to the target user,
@@ -43,5 +47,6 @@ exec su devd -s /bin/bash -c "exec env \
   DEVD_OPERATIONS_DIR=/opt/devd_src/devd/operations \
   DEVD_SOCKET=/run/devd/devd.sock \
   DEVD_TOKEN_PUBKEY=/etc/devd/token_signing_key.pub \
+  DEVD_APPROVERS_DIR=/etc/devd/approvers \
   DEVD_TARGET_ID=${DEVD_TARGET_ID:-dev-vm-01} \
   /opt/devd_venv/bin/python -m uvicorn devd.app:app --uds /run/devd/devd.sock --log-level info"

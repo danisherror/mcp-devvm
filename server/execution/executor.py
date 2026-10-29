@@ -112,6 +112,9 @@ class Executor:
                         "preconditions": approval.preconditions,
                         "manifest_version": op.version,
                         "manifest_hash": op.content_hash,
+                        # The human signatures devd checks itself; the server
+                        # only carries them (common/approval_sig.py).
+                        "approvals": await self._store.signatures_for(approval.id),
                     },
                     headers={"Authorization": f"Bearer {token}", "Idempotency-Key": approval.id},
                 )

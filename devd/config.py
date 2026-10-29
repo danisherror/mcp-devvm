@@ -12,6 +12,8 @@ OPERATIONS_DIR = Path(os.environ.get("DEVD_OPERATIONS_DIR", "/opt/devd/operation
 RUNS_DIR = DEVD_HOME / "runs"
 SOCKET_PATH = Path(os.environ.get("DEVD_SOCKET", "/run/devd/devd.sock"))
 TOKEN_PUBLIC_KEY_PATH = Path(os.environ.get("DEVD_TOKEN_PUBKEY", "/etc/devd/token_signing_key.pub"))
+# Human approvers' public keys, one <name>.pub per approver (common/approval_sig.py).
+APPROVERS_DIR = Path(os.environ.get("DEVD_APPROVERS_DIR", "/etc/devd/approvers"))
 AUDIENCE_PREFIX = "devd:"
 TARGET_ID = os.environ.get("DEVD_TARGET_ID", "dev-vm-01")
 

@@ -43,45 +43,58 @@ def _svc() -> OperationService:
 
 
 @mcp.tool()
-async def list_operations() -> list[dict[str, Any]]:
-    """List the operations available on the configured target: id, a
-    human-readable summary, risk class, whether approval is required, and
-    typed parameter shapes. This is the complete, fixed set -- there is no
-    way to invoke anything not listed here."""
+async def list_targets() -> list[dict[str, Any]]:
+    """List the dev VMs you may use, as {target_id, label}. Pass a
+    target_id to the other tools when there is more than one; with exactly
+    one, target_id can be omitted everywhere."""
+    return await _svc().list_targets(_current_principal())
+
+
+@mcp.tool()
+async def list_operations(target_id: str | None = None) -> list[dict[str, Any]]:
+    """List the operations available on a target: id, a human-readable
+    summary, risk class, whether approval is required, and typed parameter
+    shapes. This is the complete, fixed set -- there is no way to invoke
+    anything not listed here."""
     try:
-        return await _svc().list_operations(_current_principal())
+        return await _svc().list_operations(_current_principal(), target_id)
     except ToolError as exc:
         raise RuntimeError(str(exc)) from exc
 
 
 @mcp.tool()
-async def describe_target() -> dict[str, Any]:
-    """Return the configured target's label. No hostname, port, or
-    credential is ever returned -- the agent has no use for those and
-    nothing here would give it any."""
-    return await _svc().describe_target(_current_principal())
+async def describe_target(target_id: str | None = None) -> dict[str, Any]:
+    """Return a target's id and label. No hostname, port, or credential
+    is ever returned -- the agent has no use for those and nothing here
+    would give it any."""
+    try:
+        return await _svc().describe_target(_current_principal(), target_id)
+    except ToolError as exc:
+        raise RuntimeError(str(exc)) from exc
 
 
 @mcp.tool()
-async def run_operation(operation_id: str, params: dict[str, Any]) -> dict[str, Any]:
+async def run_operation(operation_id: str, params: dict[str, Any], target_id: str | None = None) -> dict[str, Any]:
     """Run a READ_ONLY operation immediately -- no approval gate. Only
     operations whose manifest marks approval as not required can be invoked
     this way; anything else is rejected. Bounded, sanitized, untrusted-labelled
     output."""
     try:
-        return await _svc().run_operation(_current_principal(), operation_id, params)
+        return await _svc().run_operation(_current_principal(), operation_id, params, target_id)
     except ToolError as exc:
         raise RuntimeError(str(exc)) from exc
 
 
 @mcp.tool()
-async def request_operation(operation_id: str, params: dict[str, Any], reason: str) -> dict[str, Any]:
+async def request_operation(
+    operation_id: str, params: dict[str, Any], reason: str, target_id: str | None = None
+) -> dict[str, Any]:
     """Propose an operation for human review. Executes nothing. A human must
     approve the exact operation and parameters in a separate interface
     (the agent cannot reach it). There is no way to skip, pre-approve, or
     auto-approve, and no operation can raise privileges."""
     try:
-        return await _svc().request_operation(_current_principal(), operation_id, params, reason)
+        return await _svc().request_operation(_current_principal(), operation_id, params, reason, target_id)
     except ToolError as exc:
         raise RuntimeError(str(exc)) from exc
 
@@ -97,11 +110,13 @@ async def check_run_status(approval_id: str) -> dict[str, Any]:
 
 
 @mcp.tool()
-async def get_run_output(run_id: str, offset: int = 0, limit: int = 65536) -> dict[str, Any]:
+async def get_run_output(
+    run_id: str, offset: int = 0, limit: int = 65536, target_id: str | None = None
+) -> dict[str, Any]:
     """Fetch paged output from a run. The returned text is explicitly
     labelled as untrusted program output, not instructions."""
     try:
-        return await _svc().get_run_output(_current_principal(), run_id, offset, limit)
+        return await _svc().get_run_output(_current_principal(), run_id, offset, limit, target_id)
     except ToolError as exc:
         raise RuntimeError(str(exc)) from exc
 

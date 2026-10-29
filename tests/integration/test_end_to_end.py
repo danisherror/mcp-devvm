@@ -10,9 +10,15 @@ from __future__ import annotations
 import shutil
 import subprocess
 import time
+import uuid
 from pathlib import Path
 
 import pytest
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
+from common.approval_sig import effect_hash, sign_approval
+from server.proposals.engine import recompute_proposal_hash
 
 from server.approvals.store import ApprovalStore
 from server.audit.logger import AuditLogger
@@ -50,8 +56,27 @@ pytestmark = pytest.mark.skipif(
 )
 
 
+APPROVERS_PUBLIC = ROOT / "data" / "approvers" / "public"
+
+
 @pytest.fixture
-async def app(tmp_path):
+def approver():
+    """A throwaway approver key, trusted by the running devd only for the
+    length of one test: the public half goes into the mounted approvers
+    directory and is removed afterwards; the private half never leaves
+    memory."""
+    name = f"pytest-{uuid.uuid4().hex[:8]}"
+    key = Ed25519PrivateKey.generate()
+    APPROVERS_PUBLIC.mkdir(parents=True, exist_ok=True)
+    pub = APPROVERS_PUBLIC / f"{name}.pub"
+    pub.write_bytes(key.public_key().public_bytes(
+        serialization.Encoding.PEM, serialization.PublicFormat.SubjectPublicKeyInfo))
+    yield name, key
+    pub.unlink(missing_ok=True)
+
+
+@pytest.fixture
+async def app(tmp_path, approver):
     targets = load_targets(ROOT / "config" / "targets.yaml")
     policy = load_policy(ROOT / "config" / "policy.yaml")
     target = next(iter(targets.values()))
@@ -86,10 +111,13 @@ async def app(tmp_path):
     dispatcher = Dispatcher(store=store, executor=executor, poll_interval_s=0.5)
     dispatcher.start()
 
-    service = OperationService(store=store, target=target, policy=policy, registry=registry, tunnel=tunnel,
+    service = OperationService(store=store, targets=targets, policy=policy, registry=registry, tunnel=tunnel,
                                 tokens=tokens, audit=audit, executor=executor, reconciler=reconciler, step_up=step_up)
 
+    global _APPROVER
+    _APPROVER = approver
     yield service, store, executor
+    _APPROVER = None
 
     await dispatcher.stop()
     await reconciler.stop()
@@ -100,10 +128,27 @@ async def app(tmp_path):
 PRINCIPAL = Principal(user_id="pytest-user", display_name="pytest", roles=("developer", "tech-lead"))
 
 
+_APPROVER = None
+
+
 async def _approve(store: ApprovalStore, approval_id: str) -> None:
+    """What `decide approve` does, minus the prompts: recompute the hash
+    from the stored fields and sign it with the approver key."""
+    name, key = _APPROVER
     approval = await store.get(approval_id)
-    await store.record_decision(approval_id=approval_id, decided_by="pytest-approver",
-                                 decision="APPROVE", displayed_hash=approval.proposal_hash, channel="test")
+    h = recompute_proposal_hash(approval)
+    signed = sign_approval(key, approver=name, approval_id=approval_id, proposal_hash=h,
+                           effect_hash=effect_hash(approval.effect_summary))
+    await store.record_decision(approval_id=approval_id, decided_by=f"approver:{name}", decision="APPROVE",
+                                 displayed_hash=h, channel="test", signature=signed.as_dict())
+
+
+async def _forge_approval(store: ApprovalStore, approval_id: str) -> None:
+    """What an agent with a shell could do: mark the row approved in the DB
+    by hand, with no human signature."""
+    approval = await store.get(approval_id)
+    await store.record_decision(approval_id=approval_id, decided_by="os:agent", decision="APPROVE",
+                                 displayed_hash=approval.proposal_hash, channel="forged")
 
 
 async def _wait_for_terminal(store: ApprovalStore, approval_id: str, timeout_s: float = 10) -> str:
@@ -149,10 +194,12 @@ class TestFullApprovalCycle:
 
 class TestManifestVersioning:
     async def test_manifest_version_mismatch_goes_stale(self, app):
-        """Simulates a devd redeploy between approval and execution by
-        tampering with the stored manifest_version after proposal (doc's
-        actual scenario is a real redeploy; this reaches the same code path
-        without needing to rebuild the container mid-test)."""
+        """Simulates a devd redeploy between proposal and execution: the
+        stored proposal is rewritten as if it had been made against manifest
+        v999, with its hash recomputed to match, so it reads as an honest
+        old proposal rather than a tampered one (doc's actual scenario is a
+        real redeploy; this reaches the same code path without rebuilding
+        the container mid-test)."""
         service, store, _executor = app
         proposal = await service.request_operation(
             PRINCIPAL, "git.status", {"repo": "api"}, "test",
@@ -165,6 +212,8 @@ class TestManifestVersioning:
         )
         approval_id = proposal["approval_id"]
         await store.db.execute("UPDATE approvals SET manifest_version = 999 WHERE id = ?", (approval_id,))
+        old = recompute_proposal_hash(await store.get(approval_id))
+        await store.db.execute("UPDATE approvals SET proposal_hash = ? WHERE id = ?", (old, approval_id))
         await store.db.commit()
         await _approve(store, approval_id)
         status = await _wait_for_terminal(store, approval_id)
@@ -240,3 +289,89 @@ class TestIdempotency:
         # A second, direct claim attempt on the same (now-settled) approval must no-op.
         result = await executor.execute(proposal["approval_id"])
         assert result == "noop"
+
+
+class TestApprovalSignatures:
+    async def test_forged_db_approval_is_refused_by_devd(self, app):
+        """Gap #4: the server-side checks all pass for a hand-written DB row,
+        so devd's own signature check is what stops it."""
+        service, store, _executor = app
+        proposal = await service.request_operation(
+            PRINCIPAL, "git.checkout", {"repo": "web", "branch": "master"}, "forgery test",
+        )
+        await _forge_approval(store, proposal["approval_id"])
+        status = await _wait_for_terminal(store, proposal["approval_id"])
+        assert status == "UNAUTHORIZED"
+        approval = await store.get(proposal["approval_id"])
+        assert approval.error_code.startswith("approval_signature_invalid")
+
+    async def test_tampered_effect_text_is_refused_by_devd(self, app):
+        """The human signs the effect text they were shown; if the DB copy
+        was altered to describe something harmless, devd's own rendering
+        won't match it."""
+        import json
+
+        service, store, _executor = app
+        proposal = await service.request_operation(
+            PRINCIPAL, "git.checkout", {"repo": "web", "branch": "master"}, "effect tamper test",
+        )
+        fake = dict(proposal["effect"], description="Does nothing at all.")
+        await store.db.execute("UPDATE approvals SET effect_summary = ? WHERE id = ?",
+                               (json.dumps(fake), proposal["approval_id"]))
+        await store.db.commit()
+        await _approve(store, proposal["approval_id"])
+        status = await _wait_for_terminal(store, proposal["approval_id"])
+        assert status == "UNAUTHORIZED"
+
+
+class TestTunnelAccountScope:
+    """Gap #1: the tunnel account must reach devd's socket and nothing else."""
+
+    async def _connect(self, tmp_path):
+        import asyncio
+
+        import asyncssh
+
+        targets = load_targets(ROOT / "config" / "targets.yaml")
+        target = next(iter(targets.values()))
+        source_addr_file = ROOT / "data" / "tunnel_source_address.txt"
+        source_address = source_addr_file.read_text().strip() if source_addr_file.exists() else "127.0.0.1"
+        priv, cert = await asyncio.to_thread(
+            mint_certificate, ca_dir=ROOT / "data" / "ca", out_prefix=tmp_path / "scope-key",
+            principal="pytest", tunnel_user=target.ssh_user, ttl="+5m", source_address=source_address,
+        )
+        return await asyncssh.connect(
+            host=target.ssh_host, port=target.ssh_port, username=target.ssh_user,
+            client_keys=asyncssh.load_keypairs([str(priv)], certlist=[str(cert)]),
+            known_hosts=None, agent_path=None, config=None, connect_timeout=10,
+        )
+
+    async def test_tcp_forwarding_is_refused(self, tmp_path):
+        import asyncssh
+
+        conn = await self._connect(tmp_path)
+        try:
+            with pytest.raises(asyncssh.ChannelOpenError):
+                await conn.open_connection("127.0.0.1", 22)
+        finally:
+            conn.close()
+
+    async def test_streamlocal_forwarding_is_refused(self, tmp_path):
+        import asyncssh
+
+        conn = await self._connect(tmp_path)
+        try:
+            with pytest.raises(asyncssh.ChannelOpenError):
+                await conn.open_unix_connection("/run/devd/devd.sock")
+        finally:
+            conn.close()
+
+    async def test_any_command_only_reaches_devd(self, tmp_path):
+        conn = await self._connect(tmp_path)
+        try:
+            result = await conn.run("id; cat /etc/passwd", input="GET /manifest HTTP/1.0\r\n\r\n", timeout=15)
+            assert "uid=" not in result.stdout
+            assert "root:" not in result.stdout
+            assert result.stdout.startswith("HTTP/1.")  # devd answered (401: no token)
+        finally:
+            conn.close()

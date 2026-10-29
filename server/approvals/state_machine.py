@@ -14,7 +14,9 @@ LEGAL_TRANSITIONS: dict[str, frozenset[str]] = {
     "PENDING": frozenset({"DENIED", "EXPIRED", "CANCELLED", "APPROVED"}),
     "APPROVED": frozenset({"EXPIRED", "CLAIMED"}),
     "CLAIMED": frozenset({"STALE", "UNAUTHORIZED", "UNREACHABLE", "RUNNING"}),
-    "RUNNING": frozenset({"SUCCEEDED", "OP_FAILED", "TIMED_OUT", "UNKNOWN"}),
+    # STALE / UNAUTHORIZED from RUNNING: devd itself refused before starting
+    # the effect (409 precondition drift, 403 missing approval signature).
+    "RUNNING": frozenset({"SUCCEEDED", "OP_FAILED", "TIMED_OUT", "UNKNOWN", "STALE", "UNAUTHORIZED"}),
     "UNKNOWN": frozenset({"SUCCEEDED", "OP_FAILED", "TIMED_OUT", "NEEDS_HUMAN"}),
 }
 

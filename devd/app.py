@@ -28,6 +28,14 @@ import structlog
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field
 
+from common.approval_sig import (
+    ApprovalSignatureError,
+    effect_hash,
+    load_public_keys,
+    required_approvers,
+    verify_approvals,
+)
+from common.canonical import NonCanonicalValue, proposal_hash
 from common.output import handle_output
 from devd import config
 from devd.auth import TokenClaims, token_dependency
@@ -61,6 +69,40 @@ class RunRequest(BaseModel):
     preconditions: dict[str, Any] = Field(default_factory=dict)
     manifest_version: int
     manifest_hash: str
+    approvals: list[dict[str, Any]] = Field(default_factory=list)
+
+
+# Must match server/proposals/engine.py CANONICAL_SCHEMA_VERSION.
+PROPOSAL_SCHEMA_VERSION = 1
+
+
+def _check_human_approval(op, params: dict[str, Any], req: RunRequest, caller: TokenClaims, idempotency_key: str) -> None:
+    """For operations that need approval, a valid server token is not
+    enough: the token-signing key sits on the MCP server host, where an agent
+    with a shell could read it. Only a human approver's signature over this
+    exact proposal counts, and devd recomputes everything it signs over from
+    its own manifest and the request, never from a value the caller hands it."""
+    approval_id = caller.approval_id
+    if approval_id.startswith("n/a:") or idempotency_key != approval_id:
+        raise HTTPException(status_code=403, detail="approval_required")
+    try:
+        recomputed = proposal_hash(
+            v=PROPOSAL_SCHEMA_VERSION, principal=caller.sub, target_id=config.TARGET_ID,
+            operation_id=op.id, manifest_version=op.version, manifest_hash=op.content_hash,
+            params=params, preconditions=req.preconditions,
+        )
+    except NonCanonicalValue as exc:
+        raise HTTPException(status_code=422, detail="non_canonical_request") from exc
+    try:
+        approvers = verify_approvals(
+            req.approvals, public_keys=load_public_keys(config.APPROVERS_DIR), approval_id=approval_id,
+            proposal_hash=recomputed, effect_hash=effect_hash(op.effect.render(params)),
+            required=required_approvers(op.risk),
+        )
+    except ApprovalSignatureError as exc:
+        log.warning("approval_signature_rejected", approval_id=approval_id, operation_id=op.id, reason=str(exc))
+        raise HTTPException(status_code=403, detail=f"approval_signature_invalid:{exc}") from exc
+    log.info("approval_signature_ok", approval_id=approval_id, operation_id=op.id, approvers=approvers)
 
 
 @app.get("/manifest")
@@ -121,6 +163,9 @@ async def run_operation(
         raise HTTPException(status_code=409, detail="manifest_version_mismatch")
 
     params = _validate_params(op, req.params)  # devd's OWN schema check, independent of the server's
+
+    if op.approval_required:
+        _check_human_approval(op, params, req, caller, idempotency_key)
 
     if existing := run_store.by_idempotency_key(idempotency_key):
         log.info("idempotent_replay", idempotency_key=idempotency_key, run_id=existing.run_id)

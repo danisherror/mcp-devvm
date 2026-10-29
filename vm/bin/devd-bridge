@@ -1,0 +1,7 @@
+#!/bin/sh
+# Login shell AND ForceCommand for the devd-tunnel account. Whatever an SSH
+# client asks to run (sshd passes it as `-c <command>`, which this ignores),
+# the session becomes a plain byte pipe to devd's unix socket -- nothing
+# else on the VM is reachable through this account. Port forwarding of any
+# kind is off (DisableForwarding yes in vm/sshd_config.d/devd-tunnel.conf).
+exec /usr/bin/socat -t 5 STDIO UNIX-CONNECT:/run/devd/devd.sock

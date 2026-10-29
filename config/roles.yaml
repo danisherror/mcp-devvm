@@ -1,5 +1,13 @@
 # user_id -> roles for the local topology (doc §9.1: the OS session
 # identifies the user; this file is the policy-facing role grant on top of
-# that identification). user_id is always "os:<unix-username>".
+# that identification). user_id is always "os:<unix-username>". Anyone not
+# listed gets the "developer" role (server/auth/roles.py).
+#
+# Roles decide what a user may REQUEST. Who may APPROVE is decided
+# separately, by which approver public keys sit in data/approvers/public/
+# (one per person, created with `python -m scripts.approver_keys init`).
 users:
   "os:agent": [developer, tech-lead]
+  # More users, e.g.:
+  # "os:alice": [developer]
+  # "os:bob":   [developer, tech-lead]
