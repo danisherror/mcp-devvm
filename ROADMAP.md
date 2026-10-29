@@ -19,7 +19,7 @@ gap discovered later. Both are called out again below because the
 - [x] `devd` cannot write its own operation files — root-owned, read-only tree (`vm/Dockerfile`), verified by `harden.sh` as the `devd` user specifically (a naive `[ -w ]` check as root always passes regardless of permissions — this was caught and fixed during testing)
 - [x] Link-local metadata address blocked — `vm/harden.sh` (iptables, best-effort in the container)
 - [ ] Disk quota, `noexec` on world-writable mounts, `cgroup` `TasksMax`/`MemoryMax` — not implemented (needs real VM/systemd resource control, not meaningfully testable in this container)
-- [x] Forwarding-only tunnel account, `ForceCommand /bin/false` — `vm/sshd_config.d/devd-tunnel.conf`, **with a documented, tested gap** (see Known gaps below)
+- [x] Tunnel account with all forwarding off; its login shell and `ForceCommand` are `vm/bin/devd-bridge`, which can only pipe to devd's socket — `vm/sshd_config.d/devd-tunnel.conf`, verified by `tests/integration/test_end_to_end.py::TestTunnelAccountScope`
 - [~] Rebuild drill — `scripts/setup_dev_vm.py` recreates the container from scratch on every run (that *is* the rebuild), but it's never been timed/drilled as a discipline the way §26.3 asks
 
 ### Phase 1 — The operation framework
@@ -30,20 +30,21 @@ gap discovered later. Both are called out again below because the
 - [x] Two-plus `READ_ONLY` operations end to end — `git.status`, `logs.tail`
 
 ### Phase 2 — Transport & control plane
-- [x] Tunnel manager: local-unix-socket-to-remote-unix-socket forward, host-key pinning, reconnect — `server/tunnel/manager.py`
+- [x] Tunnel manager: local unix socket, one SSH session per connection (no port forwarding), host-key pinning, reconnect — `server/tunnel/manager.py`
 - [x] Token minting + devd-side verification, operation-scoped — `server/auth/tokens.py`, `devd/auth.py`
 - [x] Approval store + atomic CAS claim, tested under real concurrency — `server/approvals/store.py`, `tests/unit/test_approval_store.py::test_two_workers_race_to_claim_exactly_one_wins`
 - [x] Audit: intent/outcome, hash chain, write-only sink — `server/audit/`
 - [ ] Cross-plane correlation report ("a devd run with no matching approval," §18.4) — not built; would need to parse devd's local run records against the server's approval store
 
 ### Phase 3 — Read-only MCP surface
-- [x] `list_operations`, `describe_target`, `run_operation` — `server/tools/mcp_app.py`
+- [x] `list_targets`, `list_operations`, `describe_target`, `run_operation`, with an optional `target_id` for multiple VMs — `server/tools/mcp_app.py`
 - [x] Output handler: caps, ANSI/control stripping, secret redaction, untrusted labelling — `common/output.py`
 
 ### Phase 4 — Proposals and the human gate
 - [x] Precondition capture, canonical hashing with a real test matrix — `common/canonical.py`, `tests/unit/test_canonical.py`
 - [x] `request_operation`, approval state machine (every illegal transition asserted rejected) — `server/approvals/state_machine.py`, `tests/unit/test_state_machine.py`
 - [x] Approval CLI with §19/§23 rendering rules (never truncate, show effect fields even when empty, typed confirmation for high-risk, rate indicator) — `server/approvals/decide.py`
+- [x] Approvals signed with a passphrase-protected approver key and verified by devd, not the server — `common/approval_sig.py`, `scripts/approver_keys.py`, `devd/app.py`
 - [ ] Push notifications to the human's own channels — none; the CLI's `list`/`show` is pull-only
 
 ### Phase 5 — Mutating operations
@@ -55,24 +56,37 @@ gap discovered later. Both are called out again below because the
 
 ## Known gaps (found by testing, not by inspection)
 
-1. **`PermitOpen any` on the tunnel account, not path-scoped.** This
-   OpenSSH build (9.2p1/Debian) treats `AllowTcpForwarding no` as a blanket
-   kill-switch that also blocks the stream-local forward `devd` needs, and
-   has no `PermitOpen` syntax that permits one unix-socket path while
-   excluding TCP destinations. The tunnel account can currently reach any
-   TCP host:port from inside the container, not just `devd`'s socket.
-   Full writeup in `vm/sshd_config.d/devd-tunnel.conf`. **Priority: revisit
-   before this touches anything beyond a single-purpose demo container.**
+1. ~~**`PermitOpen any` on the tunnel account, not path-scoped.**~~
+   **Fixed.** OpenSSH 9.2p1 has no way to allow stream-local forwarding to
+   one socket while excluding TCP, so forwarding is now off entirely
+   (`DisableForwarding yes`). Every session on the tunnel account runs
+   `vm/bin/devd-bridge` (forced command and login shell), which pipes it to
+   devd's socket; the server opens one SSH session per local connection.
+   `TestTunnelAccountScope` checks that TCP and stream-local forwarding are
+   refused and that an arbitrary command only reaches devd.
 2. **`--privileged` on the dev-VM container**, needed only because
    bubblewrap's unprivileged user namespaces don't work nested inside this
    sandbox's own Docker. Not a gap on a real VM; a gap in this demo's
    fidelity to "the VM runs unprivileged."
-3. **Single target, single user.** `server/main.py` picks
-   `next(iter(targets.values()))`; `config/roles.yaml` has one entry. Real
-   multi-user support needs the target-resolution and role-lookup paths
-   generalized.
+3. ~~**Single target, single user.**~~ **Fixed in code.** The MCP tools
+   take an optional `target_id` (`list_targets` shows the ones you may
+   use; others look nonexistent), step-up is tracked per user, and each
+   approver has their own key, so four-eyes counts distinct people.
+   Remaining: `scripts/setup_dev_vm.py` provisions one demo target only,
+   and `config/roles.yaml` still ships a single example user.
 4. **The agent can reach the approval channel in the local topology.**
-   Found in review, not by testing. `server/approvals/decide.py` runs as
+   **Mostly fixed.** `decide approve` now signs the proposal hash and the
+   displayed effect text with an Ed25519 approver key encrypted by a
+   passphrase only the human knows. devd holds only the approvers' public
+   keys and, for every operation that needs approval, recomputes both
+   hashes from its own manifest and the request and verifies the
+   signature. So a forged DB row or a stolen token-signing key is no
+   longer enough (`TestApprovalSignatures`, `tests/unit/test_approval_sig.py`).
+   devd also requires two distinct approvers for `DESTRUCTIVE`/`PRIVILEGE`
+   on its own. **Still open:** `decide.py` lives in a repo the agent can
+   edit, so a modified copy could capture the passphrase; run it from a
+   copy the agent can't write, or move to a hardware key. Original
+   finding, for context: found in review, not by testing. `server/approvals/decide.py` runs as
    the same OS user as the MCP server, and `data/approvals.db` is
    readable and writable by that user. Any agent with a terminal tool can
    approve its own request or rewrite the DB, which breaks B4 ("the
@@ -92,9 +106,8 @@ gap discovered later. Both are called out again below because the
    recompute the hash from the stored fields
    (`server.proposals.engine.recompute_proposal_hash`) and refuse on
    mismatch; covered by `tests/unit/test_executor_hash.py`. Remaining
-   limit: the hash is unkeyed, so someone with write access to the DB can
-   forge a consistent row. Closing that depends on #4 (a signed approval
-   or a DB the agent can't write).
+   limit, the unkeyed hash, is now covered by #4's signatures: devd
+   recomputes the hash itself and checks the human signed it.
 
 ## Not started (Phase 6 — hardening)
 
@@ -130,9 +143,7 @@ Roughly in the order the doc itself suggests tackling them:
 
 ## Suggested next step
 
-First fix Known gaps #5 (hash recompute, small) and #4 (approval-channel
-isolation), because both undercut the core "human approves the exact
-thing that runs" guarantee. After that, #1 above (wire the existing test
-suites into CI) is the highest-leverage next move — everything else in Phase 6 is
+Wire the existing test suites into CI (#1 above). It's the
+highest-leverage next move — everything else in Phase 6 is
 easier to get right with that safety net already in place, and it's the
 only item on this list that needs no new infrastructure to start.

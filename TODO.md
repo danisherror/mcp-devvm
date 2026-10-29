@@ -5,13 +5,11 @@ are in [ROADMAP.md](./ROADMAP.md).
 
 ## Security gaps (fix first)
 
-- [ ] **Isolate the approval channel from the agent.** Any agent with a shell can run `decide approve` or edit `data/approvals.db`. Run the approval store and CLI as a separate OS user, or require approvals signed with a key the agent can't read. Also makes the proposal hash unforgeable. (ROADMAP Known gap #4)
-- [ ] **Scope the SSH tunnel account to devd's socket only.** `PermitOpen any` currently allows forwarding to any TCP host:port. Re-test on your OpenSSH version, or move to the outbound job-queue transport (doc §11.4). (ROADMAP Known gap #1)
+- [ ] **Protect the approval CLI itself.** Approvals are now signed and checked by devd, but an agent that can edit the repo could modify `decide.py` to capture the passphrase. Run `decide` from a copy the agent can't write, or move approver keys to a hardware key / passkey. (ROADMAP Known gap #4)
 
 ## Quick wins (no new infrastructure)
 
 - [ ] **CI:** run `tests/unit` and `tests/adversarial` on every push; integration tests where Docker is available.
-- [ ] **Update ROADMAP's "Suggested next step"** — it still lists the hash recompute fix, which is done.
 - [ ] **Cross-plane correlation report:** flag any devd run with no matching approval (doc §18.4).
 
 ## Features
@@ -19,7 +17,8 @@ are in [ROADMAP.md](./ROADMAP.md).
 - [ ] **`NETWORK_EXEC` operations** (`npm install`, running tests) with a per-run container sandbox (doc §14.3).
 - [ ] **`DESTRUCTIVE` operations** with four-eyes approval and pre-run snapshots — the approval mechanism already exists.
 - [ ] **Push notifications** to the approver when a request arrives (currently pull-only via `decide list`).
-- [ ] **Multiple users and targets** — generalize `server/main.py`'s single-target pick and `config/roles.yaml`.
+- [ ] **Provision more than one demo target** in `scripts/setup_dev_vm.py` (the server side already supports several).
+- [ ] **Demo GIF** of propose → approve → run at the top of the README.
 
 ## Hardening (Phase 6)
 
@@ -35,6 +34,12 @@ are in [ROADMAP.md](./ROADMAP.md).
 - [ ] Rename the repo folder from `template-mcp-server` to `mcp-devvm`.
 
 ## Done
+
+- [x] Signed human approvals, verified by devd: a forged DB row or a stolen token key can't run anything that needs approval (ROADMAP Known gap #4).
+- [x] SSH tunnel account can no longer forward ports: all forwarding off, every session forced into a pipe to devd's socket (ROADMAP Known gap #1).
+- [x] Several users and targets: `target_id` on the MCP tools, `list_targets`, per-user step-up, one approver key per person (ROADMAP Known gap #3).
+- [x] Fix `scripts/setup_dev_vm.py` pinning the wrong tunnel source address on Docker Desktop (macOS), which made every SSH login fail there.
+- [x] MIT license and GitHub topics.
 
 - [x] Recompute the proposal hash at approval and execution time (ROADMAP Known gap #5).
 - [x] Rename `[0] MCP_SERVER_DEVVM.md` to `MCP_SERVER_DEVVM.md`.

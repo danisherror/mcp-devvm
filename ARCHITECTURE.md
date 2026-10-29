@@ -24,18 +24,18 @@ flowchart TB
     E --> F["Policy check + precondition capture<br/>server/policy · server/services"]
     F --> G[("Approval store: PENDING<br/>server/approvals/store.py")]
 
-    G -.->|out-of-band, agent cannot reach this| H["👤 Human reviews<br/>server/approvals/decide.py (CLI)"]
-    H -->|approve| I[("APPROVED")]
+    G -.->|out-of-band, separate terminal| H["👤 Human reviews<br/>server/approvals/decide.py (CLI)"]
+    H -->|approve: passphrase unlocks<br/>approver key, signs proposal| I[("APPROVED + signature")]
     H -->|deny| J[("DENIED -- terminal")]
 
     I --> K["Dispatcher notices<br/>(polls every ~2s)"]
     K --> L["Executor claims atomically<br/>APPROVED to CLAIMED"]
     L --> M["Re-verify policy + manifest hash<br/>(state may have changed since approval)"]
-    M --> N["Mint one-operation, two-minute token<br/>open the SSH tunnel if not already up"]
-    N --> O["POST to devd, over the tunnel<br/>Idempotency-Key = approval_id"]
+    M --> N["Mint one-operation, two-minute token<br/>open the SSH connection if not already up"]
+    N --> O["POST to devd: one SSH session per connection,<br/>forced into a pipe to devd's socket<br/>Idempotency-Key = approval_id, signatures attached"]
     D --> O
 
-    O --> P["devd re-validates independently<br/>token scope · params · manifest version"]
+    O --> P["devd re-validates independently<br/>token scope · params · manifest version<br/>· human signature over recomputed hashes"]
     P --> Q["Sandbox built FROM the manifest's<br/>effect declaration -- no other input"]
     Q --> R["bubblewrap: execve directly<br/>no shell anywhere"]
 
@@ -109,7 +109,8 @@ sequenceDiagram
 
     Note over Human,CLI: separate process -- the agent cannot reach this path
     Human->>CLI: decide.py show / approve appr_xxx
-    CLI->>Store: record_decision(APPROVE, displayed_hash)
+    Human->>CLI: approver passphrase
+    CLI->>Store: record_decision(APPROVE, displayed_hash, signature)
     Store-->>CLI: status=APPROVED
 
     loop every ~2s
@@ -123,6 +124,7 @@ sequenceDiagram
     Exec->>Tun: ensure_connected(target)
     Exec->>App: POST /operations/{id}/run<br/>token + Idempotency-Key=approval_id
     App->>App: verify token scope, manifest version, params<br/>(its OWN copies -- never trusts the server)
+    App->>App: recompute proposal + effect hashes, verify<br/>approver signature(s) against its own public keys
     App->>Fw: OperationContext(op, params, preconditions)
     Fw->>Sbx: run_sandboxed(argv, reads, writes, network)
     Sbx-->>Fw: exit_code, stdout, stderr

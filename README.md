@@ -6,7 +6,8 @@ branches, restart services — while being treated as hostile at every step. The
 agent never runs a command. It selects a **typed operation** from a fixed,
 reviewed registry; a daemon (`devd`) on the VM re-validates and sandboxes it
 from the same declaration a human approves; nothing executes without an
-out-of-band human decision.
+human decision that `devd` itself verifies: a signature from an approver
+key that only the human can unlock.
 
 This covers the doc's Phases 0–5 (§26.3) against a Docker container standing
 in for the dev VM, with namespace-mode (bubblewrap) sandboxing. Phase 6's
@@ -16,8 +17,8 @@ anchoring, paging — needs real infrastructure this sandbox doesn't have; see
 
 **Everything described as "working" here was actually run** — the dev-VM
 container is built and driven for real, over a real SSH tunnel, through real
-bubblewrap sandboxes, with a real approval CLI in a separate process. 107
-tests pass, including 7 integration tests against the live container.
+bubblewrap sandboxes, with a real approval CLI in a separate process. 145
+tests pass, including 12 integration tests against the live container.
 
 See [ARCHITECTURE.md](./ARCHITECTURE.md) for two diagrams — the request
 lifecycle end to end, and which file talks to which and when — and
@@ -32,8 +33,9 @@ doc's own build order.
                               ├─ policy · proposals · approvals (SQLite)
                               ├─ audit (hash-chained JSONL)
                               │
-                         ══ SSH tunnel, cert auth ══
-                    local unix socket → remote unix socket
+                         ══ SSH, cert auth, no forwarding ══
+              local unix socket → one SSH session per connection
+                → forced command pipes it to devd's unix socket
                               │
                               ▼
                     devd (devd/, the "VM" container)
@@ -48,8 +50,9 @@ doc's own build order.
 
 Two independent enforcement points (doc's B5): a compromised control plane
 still can't exceed the operation set, because `devd` re-validates every
-param against its own on-disk manifests and re-checks the per-request token's
-operation scope before doing anything.
+param against its own on-disk manifests, re-checks the per-request token's
+operation scope, and — for anything that needs approval — verifies a human
+approver's signature over the exact proposal before doing anything.
 
 ## Quick start
 
@@ -59,6 +62,11 @@ uv venv .venv && uv pip install --python .venv/bin/python -e ".[dev]"
 # Build + start the demo dev-VM container, mint the CA and token-signing
 # keys, and pin the container's real sshd host key into config/targets.yaml.
 .venv/bin/python scripts/setup_dev_vm.py
+
+# Create your approver key. You pick a passphrase; it's never stored, and
+# you'll type it each time you approve something. devd trusts the public
+# half (data/approvers/public/ is mounted into the VM).
+.venv/bin/python -m scripts.approver_keys init
 
 # Run the MCP server (stdio transport) -- wire this into Claude Code / any
 # MCP client the same way you would any other stdio server:
@@ -71,7 +79,8 @@ uv venv .venv && uv pip install --python .venv/bin/python -e ".[dev]"
 From the agent, `request_operation("git.checkout", {"repo": "api", "branch": "..."}, "reason")`
 returns `{"approval_id": ..., "status": "PENDING"}` and executes nothing.
 Approve or deny it from a **separate terminal** — this is deliberately not
-an MCP tool, so the agent cannot reach it (doc §7.2, B4):
+an MCP tool (doc §7.2, B4). Approving asks for your approver passphrase and
+signs the exact proposal and effect text you were shown:
 
 ```bash
 .venv/bin/python -m server.approvals.decide list
@@ -123,7 +132,7 @@ Then, before using it:
 3. Open Copilot Chat, switch the mode dropdown at the bottom of the chat box
    from **Ask**/**Edit** to **Agent**.
 4. Click the tools icon (🔧) in the chat input and confirm `mcp-devvm`'s
-   tools are enabled — `list_operations`, `describe_target`,
+   tools are enabled — `list_targets`, `list_operations`, `describe_target`,
    `run_operation`, `request_operation`, `check_run_status`,
    `get_run_output`, `list_my_pending_approvals`.
 5. Chat normally — e.g. "check out feature/login-fix in the api repo." The
@@ -174,18 +183,10 @@ production posture:
   attribution — just with the CA private key as a 0600 file instead of in a
   KMS. The doc's own fallback ladder for topology-A-without-CA-infra
   explicitly allows this.
-- **`PermitOpen any` on the tunnel account, not a path-scoped allow.**
-  Genuinely tested, not assumed: this OpenSSH build (9.2p1/Debian) treats
-  `AllowTcpForwarding no` as a blanket kill-switch that also blocks
-  stream-local forwarding, and `PermitOpen` has no syntax here that permits
-  one specific unix-socket path while excluding TCP destinations — `any` is
-  the only value that unblocks the streamlocal forward we need, and it
-  unblocks arbitrary TCP-to-TCP forwarding along with it. Full writeup and
-  the exact failure modes we hit are in `vm/sshd_config.d/devd-tunnel.conf`.
-  This is a real, open gap versus the doc's intent, mitigated only by the
-  container exposing no other meaningful listening service. A production
-  build should re-verify against its actual OpenSSH version, or use the
-  outbound-job-queue transport (doc §11.4) instead.
+- **Approver keys are passphrase-encrypted files, not hardware keys.**
+  `data/approvers/private/<name>.key` is readable by your OS user, so the
+  passphrase is what protects it. A hardware key or passkey would remove
+  the file entirely; see Known limitations.
 - **`devd`'s mutating-call handling runs synchronously**, not backgrounded
   with polling (doc §13.5). Every shipped operation finishes in well under a
   second, so `POST /operations/{id}/run` awaits completion and returns the
@@ -196,8 +197,9 @@ production posture:
   (exercised for real in `tests/integration/test_end_to_end.py::TestFaultInjection`).
   A genuinely long-running operation would need `asyncio.create_task` +
   polling; nothing else here would need to change to support that.
-- **SQLite control-plane store**, single MCP-server process, single demo
-  user/target. The doc says SQLite (WAL, `BEGIN IMMEDIATE`) is adequate for
+- **SQLite control-plane store**, single MCP-server process. Several users
+  and targets are supported in config, but only one demo target is
+  provisioned by `scripts/setup_dev_vm.py`. The doc says SQLite (WAL, `BEGIN IMMEDIATE`) is adequate for
   the local topology; this just doesn't scale it to Postgres/multi-tenant.
 - **CLI approval (`server/approvals/decide.py`), not a web UI.** The doc
   treats the decision path as "the human path — NOT an MCP tool"; a
@@ -227,15 +229,21 @@ the live container and is covered by a passing test:
 - Real bubblewrap sandboxing: verified undeclared reads fail (`No such file
   or directory`), undeclared writes land in a throwaway filesystem (never
   the real host path), network is unreachable when undeclared.
-- Real SSH: a genuine certificate-authenticated tunnel, a genuine
-  local-unix-socket-to-remote-unix-socket forward, a genuine per-request
-  JWT devd independently verifies against a key it only holds the public
-  half of.
+- Real SSH: a genuine certificate-authenticated connection, a genuine
+  per-request JWT devd independently verifies against a key it only holds
+  the public half of. The tunnel account can't forward anything: TCP and
+  stream-local forwarding are both refused, and any command it's asked to
+  run only ever reaches devd's socket (`TestTunnelAccountScope`).
+- Real human-approval signatures: a DB row marked approved by hand (what an
+  agent with a shell could do) is refused by devd with 403, and so is a
+  real signature when the effect text shown to the human was altered
+  (`TestApprovalSignatures`).
 - Real cross-plane enforcement (B5): a token minted for one operation is
   rejected (403) if replayed against a different operation's endpoint.
-- Real manifest-version binding: mutating an approval's stored
-  `manifest_version` after proposal makes execution settle `STALE`, not
-  silently run against different code.
+- Real manifest-version binding: a proposal made against an older
+  manifest version settles `STALE`, not silently run against different
+  code; editing the stored version without a matching hash settles
+  `UNAUTHORIZED`.
 - Real precondition check-and-act: `git.checkout` re-verifies `HEAD` and
   worktree cleanliness *inside the sandboxed operation*, microseconds before
   the mutation; stale preconditions get `409 precondition_drift`.
@@ -273,7 +281,7 @@ common/            shared pure logic: param validation, canonical JCS-like
                    by both planes, never a trust dependency between them
 vm/                the container standing in for the dev VM: Dockerfile,
                    sshd hardening, entrypoint, demo data seeding
-scripts/           SSH CA, token-signing keypair, dev-VM setup orchestrator
+scripts/           SSH CA, token-signing keypair, approver keys, dev-VM setup
 config/            targets.yaml (server-side only), policy.yaml, roles.yaml
 tests/             unit, adversarial (isolation/structural), integration
                    (against the real container)
@@ -281,27 +289,25 @@ tests/             unit, adversarial (isolation/structural), integration
 
 ## Known limitations to know about before extending this
 
-- **The approval channel is only out-of-band if the agent has no shell.**
-  `decide.py` runs as your OS user and writes to `data/approvals.db`,
-  which your user can read and write. An agent that can run terminal
-  commands as you (Claude Code, VS Code agent mode, and others) could
-  run `decide approve` itself or edit the SQLite file. The blast radius
-  is still bounded, because `devd` independently re-validates the
-  operation and params, so the worst case is one of the four shipped
-  operations running without your consent, not arbitrary code. Until
-  this is fixed, run the agent without terminal access, or run the
-  approval store and CLI as a separate OS user. See ROADMAP, Known gaps #4.
-- **The proposal hash is unkeyed.** The executor and `decide.py` now
-  recompute the hash from the stored fields, so editing `params` or
-  `preconditions` after proposal is caught. But anyone who can write the
-  DB can also recompute a matching hash, so this doesn't replace fixing
-  the approval-channel gap above. See ROADMAP, Known gaps #5.
-- Single target, single demo user, roles hardcoded to one principal in
-  `config/roles.yaml` — extend that file and `server/main.py`'s
-  single-target assumption before treating this as multi-tenant.
-- The `PermitOpen any` gap above is the one item worth re-testing against
-  your actual OpenSSH version before trusting the tunnel account's scoping
-  in anything beyond a single-purpose demo container.
+- **An agent with a shell can still trojan the approval CLI.** Signed
+  approvals stop an agent from approving on its own: writing the DB, or
+  using the server's token key (both readable by your OS user), no longer
+  gets anything that needs approval past devd. But `decide.py` lives in
+  the same repo the agent can edit, so a modified copy could capture your
+  passphrase the next time you type it. If your agent has terminal or
+  file-write access, run `decide` from a copy it can't write (a separate
+  OS user or a read-only install), or move approver keys to a hardware
+  key. Use a strong passphrase: the encrypted key file can be copied and
+  attacked offline.
+- **Multiple users and targets need some setup by hand.** Add users to
+  `config/roles.yaml` and give each approver their own key; add targets to
+  `config/targets.yaml` and `config/policy.yaml`. The agent passes
+  `target_id` when there's more than one. `scripts/setup_dev_vm.py` only
+  provisions the one demo container.
 - No egress allowlist / IMDS blocking / disk quota enforcement on the VM
   side beyond what `vm/harden.sh` does (link-local block, permission
   checks) — real §17 blast-radius hardening needs a real VM and IaC.
+
+## License
+
+MIT — see [LICENSE](./LICENSE).
