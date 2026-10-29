@@ -97,7 +97,7 @@ def _check_human_approval(op, params: dict[str, Any], req: RunRequest, caller: T
         approvers = verify_approvals(
             req.approvals, public_keys=load_public_keys(config.APPROVERS_DIR), approval_id=approval_id,
             proposal_hash=recomputed, effect_hash=effect_hash(op.effect.render(params)),
-            required=required_approvers(op.risk),
+            required=required_approvers(op.risk), requester=caller.sub,
         )
     except ApprovalSignatureError as exc:
         log.warning("approval_signature_rejected", approval_id=approval_id, operation_id=op.id, reason=str(exc))

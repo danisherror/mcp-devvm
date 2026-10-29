@@ -59,14 +59,25 @@ approver's signature over the exact proposal before doing anything.
 ```bash
 uv venv .venv && uv pip install --python .venv/bin/python -e ".[dev]"
 
+# Install a root-owned copy of the approval CLI that the agent can't edit
+# (it asks you to confirm the git commit it installs from), and create
+# /etc/mcp-devvm/approvers/, the root-owned directory of approver public
+# keys that devd trusts.
+sudo scripts/install_decide.sh
+
 # Build + start the demo dev-VM container, mint the CA and token-signing
 # keys, and pin the container's real sshd host key into config/targets.yaml.
 .venv/bin/python scripts/setup_dev_vm.py
 
-# Create your approver key. You pick a passphrase; it's never stored, and
-# you'll type it each time you approve something. devd trusts the public
-# half (data/approvers/public/ is mounted into the VM).
-.venv/bin/python -m scripts.approver_keys init
+# Create your approver key. It's named after your OS user, one per user.
+# You pick a passphrase; it's never stored, and you'll type it each time
+# you approve something.
+/opt/mcp-devvm-approve/bin/approver-keys init
+
+# Enroll it, so devd trusts it. This needs root because the trusted key
+# directory must not be writable by you (or an agent running as you). It
+# asks for your passphrase to prove the key is yours.
+sudo /opt/mcp-devvm-approve/bin/approver-keys enroll
 
 # Run the MCP server (stdio transport) -- wire this into Claude Code / any
 # MCP client the same way you would any other stdio server:
@@ -83,10 +94,18 @@ an MCP tool (doc §7.2, B4). Approving asks for your approver passphrase and
 signs the exact proposal and effect text you were shown:
 
 ```bash
-.venv/bin/python -m server.approvals.decide list
-.venv/bin/python -m server.approvals.decide show appr_xxxxxxxx
-.venv/bin/python -m server.approvals.decide approve appr_xxxxxxxx
+/opt/mcp-devvm-approve/bin/decide list
+/opt/mcp-devvm-approve/bin/decide show appr_xxxxxxxx
+/opt/mcp-devvm-approve/bin/decide approve appr_xxxxxxxx
 ```
+
+(`.venv/bin/python -m server.approvals.decide ...` runs the same code from
+the repo. That's fine for trying it out with an agent that has no shell,
+but an agent that can edit the repo could change that copy to capture your
+passphrase.)
+
+For `DESTRUCTIVE` and `PRIVILEGE` operations, devd needs two approvals from
+two different OS users, and neither can be the user who made the request.
 
 The running MCP server's background dispatcher notices the approval (a
 separate process writing to the same SQLite store) within ~2s and executes
@@ -145,8 +164,8 @@ what the agent proposed happens in an ordinary VS Code integrated terminal
 (`` Ctrl+` ``), same commands as the Quick start section:
 
 ```bash
-.venv/bin/python -m server.approvals.decide list
-.venv/bin/python -m server.approvals.decide approve appr_xxxxxxxx
+/opt/mcp-devvm-approve/bin/decide list
+/opt/mcp-devvm-approve/bin/decide approve appr_xxxxxxxx
 ```
 
 ## The shipped operations
@@ -262,9 +281,15 @@ the live container and is covered by a passing test:
 ```bash
 .venv/bin/python -m pytest tests/unit -q          # pure logic, no infra
 .venv/bin/python -m pytest tests/adversarial -q   # isolation/structural gates
-.venv/bin/python scripts/setup_dev_vm.py           # (if not already up)
+.venv/bin/python scripts/setup_dev_vm.py --test-approvers
 .venv/bin/python -m pytest tests/integration -q   # against the live container
 ```
+
+The integration tests trust throwaway approver keys by writing them into
+devd's key directory, so they need a VM set up with `--test-approvers`,
+which mounts a directory your user can write. Don't use that VM with an
+agent connected. Against a normal VM, the tests that approve something
+are skipped.
 
 ## Project layout
 
@@ -289,16 +314,22 @@ tests/             unit, adversarial (isolation/structural), integration
 
 ## Known limitations to know about before extending this
 
-- **An agent with a shell can still trojan the approval CLI.** Signed
+- **The approval CLI is only as safe as the copy you run.** Signed
   approvals stop an agent from approving on its own: writing the DB, or
   using the server's token key (both readable by your OS user), no longer
-  gets anything that needs approval past devd. But `decide.py` lives in
-  the same repo the agent can edit, so a modified copy could capture your
-  passphrase the next time you type it. If your agent has terminal or
-  file-write access, run `decide` from a copy it can't write (a separate
-  OS user or a read-only install), or move approver keys to a hardware
-  key. Use a strong passphrase: the encrypted key file can be copied and
-  attacked offline.
+  gets anything that needs approval past devd. The repo copy of
+  `decide.py` can be edited by an agent, so use the root-owned copy from
+  `sudo scripts/install_decide.sh`, invoked by its full path. That copy
+  still runs as your OS user, inside a shell whose startup files the agent
+  can edit, so a hardware key or a separate OS account for approving is
+  stronger. Use a strong passphrase: the encrypted key file can be copied
+  and attacked offline.
+- **Enrolling approvers needs root.** devd only trusts public keys in
+  the root-owned `/etc/mcp-devvm/approvers/`, so an agent running as you
+  can't add one of its own. Adding a person means `sudo approver-keys
+  enroll`; revoking one means `sudo rm /etc/mcp-devvm/approvers/<user>.pub`.
+  Keys from before this change in `data/approvers/public/` are no longer
+  trusted: enroll them again.
 - **Multiple users and targets need some setup by hand.** Add users to
   `config/roles.yaml` and give each approver their own key; add targets to
   `config/targets.yaml` and `config/policy.yaml`. The agent passes

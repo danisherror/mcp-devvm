@@ -3,7 +3,7 @@
 Usage:
     python -m server.approvals.decide list
     python -m server.approvals.decide show <approval_id>
-    python -m server.approvals.decide approve <approval_id> [--approver NAME]
+    python -m server.approvals.decide approve <approval_id>
     python -m server.approvals.decide deny <approval_id> [--reason TEXT]
 
 This CLI is the out-of-band channel the agent cannot reach (B4). It reads
@@ -14,6 +14,13 @@ Approving needs the approver's passphrase (scripts/approver_keys.py). The
 CLI signs the exact proposal and effect text it just showed you; devd
 refuses to run anything that needs approval without that signature, so a
 row an agent writes into the DB by hand is not enough to run anything.
+
+You always sign with your own OS user's approver key. For four-eyes
+operations you can't approve a request you made yourself.
+
+Run this from the root-owned copy that scripts/install_decide.sh makes, not
+from the repo: the agent can edit the repo, and a modified copy of this file
+could capture the passphrase.
 """
 
 from __future__ import annotations
@@ -25,8 +32,15 @@ import sys
 from pathlib import Path
 
 from server.approvals.store import Approval, ApprovalStore
-from common.approval_sig import effect_hash, sign_approval
-from scripts.approver_keys import list_approvers, load_private_key
+from common.approval_sig import approver_user, effect_hash, required_approvers, sign_approval
+from scripts.approver_keys import (
+    TRUSTED_PUBLIC_DIR,
+    current_approver_name,
+    enrolled_key_matches,
+    list_approvers,
+    load_private_key,
+    trusted_key_path,
+)
 from server.auth.principal import resolve_local_principal
 from server.proposals.engine import recompute_proposal_hash
 
@@ -77,7 +91,7 @@ async def _list(store: ApprovalStore, principal_id: str | None) -> None:
         # CLI operator view: show everything pending, not just one's own.
         cur = await store.db.execute("SELECT id FROM approvals WHERE status='PENDING' ORDER BY created_at DESC")
         rows = await cur.fetchall()
-        approvals = [a for a in (await store.get(r["id"]) for r in rows) if a is not None]
+        approvals = [a for a in [await store.get(r["id"]) for r in rows] if a is not None]
     if not approvals:
         print("no pending approvals")
         return
@@ -95,28 +109,38 @@ async def _show(store: ApprovalStore, approval_id: str) -> None:
     print(_render(approval, rate_hint=f"rate: {recent} operation(s) proposed by this principal in the last 5 minutes"))
 
 
-def _pick_approver(requested: str | None) -> str:
-    names = list_approvers()
-    if requested:
-        if requested not in names:
-            print(f"no approver key named '{requested}' (have: {', '.join(names) or 'none'})", file=sys.stderr)
-            raise SystemExit(1)
-        return requested
-    if len(names) == 1:
-        return names[0]
-    if not names:
-        print("no approver key on this machine -- create one with: python -m scripts.approver_keys init",
-              file=sys.stderr)
-    else:
-        print(f"several approver keys found ({', '.join(names)}) -- pick one with --approver", file=sys.stderr)
-    raise SystemExit(1)
+def _my_approver_name() -> str:
+    """Your approver key is the one named after your OS user; there is no
+    choosing another, since keys stand for people (scripts/approver_keys.py)."""
+    try:
+        name = current_approver_name()
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        raise SystemExit(1) from exc
+    if name not in list_approvers():
+        print(f"no approver key for OS user '{name}' -- create one with: approver-keys init", file=sys.stderr)
+        raise SystemExit(1)
+    if not trusted_key_path(name).is_file():
+        print(f"your approver key isn't enrolled in {TRUSTED_PUBLIC_DIR}, so devd would refuse the signature -- "
+              "run: sudo /opt/mcp-devvm-approve/bin/approver-keys enroll", file=sys.stderr)
+        raise SystemExit(1)
+    return name
 
 
-async def _approve(store: ApprovalStore, approval_id: str, approver: str | None) -> None:
-    approver_name = _pick_approver(approver)
+async def _approve(store: ApprovalStore, approval_id: str) -> None:
+    approver_name = _my_approver_name()
     approval = await store.get(approval_id)
     if approval is None:
         print(f"no such approval: {approval_id}", file=sys.stderr)
+        raise SystemExit(1)
+
+    # Same rule devd applies (common/approval_sig.py): with four-eyes the
+    # requester's own approval doesn't count, so refuse it here rather than
+    # let it fail at run time.
+    four_eyes = required_approvers(approval.risk_class, approval.approvals_required) > 1
+    if four_eyes and approver_user(approver_name) == approval.principal_id:
+        print(f"refusing to approve {approval.id}: you requested it, and {approval.risk_class} operations "
+              "need two approvers other than the requester", file=sys.stderr)
         raise SystemExit(1)
 
     # Hash exactly the fields rendered below, rather than trusting the
@@ -149,15 +173,19 @@ async def _approve(store: ApprovalStore, approval_id: str, approver: str | None)
     except (ValueError, TypeError):
         print("wrong passphrase -- not approved", file=sys.stderr)
         raise SystemExit(1) from None
+    if not enrolled_key_matches(approver_name, key):
+        print(f"your private key doesn't match the one enrolled in {TRUSTED_PUBLIC_DIR} -- not approved "
+              "(re-enroll with: sudo /opt/mcp-devvm-approve/bin/approver-keys enroll --replace)", file=sys.stderr)
+        raise SystemExit(1)
 
     signed = sign_approval(
         key, approver=approver_name, approval_id=approval.id,
         proposal_hash=displayed_hash, effect_hash=effect_hash(approval.effect_summary),
     )
-    # decided_by is the approver key, not the OS user: four-eyes counts
-    # distinct keys, which is also what devd counts.
+    # decided_by is the key owner's principal id, so the store can compare it
+    # with principal_id and count distinct people, like devd does.
     result = await store.record_decision(
-        approval_id=approval.id, decided_by=f"approver:{approver_name}", decision="APPROVE",
+        approval_id=approval.id, decided_by=approver_user(approver_name), decision="APPROVE",
         displayed_hash=displayed_hash, channel="cli", signature=signed.as_dict(),
     )
     print(f"status: {result.status}")
@@ -177,6 +205,16 @@ async def _deny(store: ApprovalStore, approval_id: str, decided_by: str, reason:
     print(f"status: {result.status}")
 
 
+def _warn_if_writable_copy() -> None:
+    """A reminder for humans, not a protection: an agent could delete it
+    from the repo copy along with anything else."""
+    import os
+
+    if os.stat(__file__).st_uid != 0:
+        print("warning: running decide from a copy you (and the agent) can edit. Install the protected "
+              "copy with: sudo scripts/install_decide.sh", file=sys.stderr)
+
+
 async def _main() -> None:
     parser = argparse.ArgumentParser(prog="python -m server.approvals.decide")
     sub = parser.add_subparsers(dest="cmd", required=True)
@@ -189,7 +227,6 @@ async def _main() -> None:
 
     p_approve = sub.add_parser("approve")
     p_approve.add_argument("approval_id")
-    p_approve.add_argument("--approver", default=None, help="approver key name (default: the only one)")
 
     p_deny = sub.add_parser("deny")
     p_deny.add_argument("approval_id")
@@ -197,6 +234,8 @@ async def _main() -> None:
 
     args = parser.parse_args()
     principal = resolve_local_principal()
+    if args.cmd == "approve":
+        _warn_if_writable_copy()
 
     store = ApprovalStore(DB_PATH)
     await store.open()
@@ -206,7 +245,7 @@ async def _main() -> None:
         elif args.cmd == "show":
             await _show(store, args.approval_id)
         elif args.cmd == "approve":
-            await _approve(store, args.approval_id, args.approver)
+            await _approve(store, args.approval_id)
         elif args.cmd == "deny":
             await _deny(store, args.approval_id, principal.user_id, args.reason)
     finally:

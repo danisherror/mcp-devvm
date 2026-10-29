@@ -15,6 +15,7 @@ from typing import Any
 
 import aiosqlite
 
+from common.approval_sig import required_approvers
 from server.approvals.state_machine import IllegalTransition, validate_transition
 
 SCHEMA = """
@@ -197,6 +198,10 @@ class ApprovalStore:
         if time.time() > approval.expires_at:
             await self._set_status_unchecked(approval_id, "EXPIRED")
             raise IllegalTransition("decision window elapsed")
+        if (decision == "APPROVE" and decided_by == approval.principal_id
+                and required_approvers(approval.risk_class, approval.approvals_required) > 1):
+            # devd refuses these signatures too (common/approval_sig.py).
+            raise IllegalTransition("requester cannot approve a four-eyes request")
 
         decision_id = "dec_" + uuid.uuid4().hex[:16]
         try:
