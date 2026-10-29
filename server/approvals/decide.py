@@ -20,6 +20,7 @@ from pathlib import Path
 
 from server.approvals.store import Approval, ApprovalStore
 from server.auth.principal import resolve_local_principal
+from server.proposals.engine import recompute_proposal_hash
 
 DB_PATH = Path("data/approvals.db")
 
@@ -92,6 +93,14 @@ async def _approve(store: ApprovalStore, approval_id: str, decided_by: str) -> N
         print(f"no such approval: {approval_id}", file=sys.stderr)
         raise SystemExit(1)
 
+    # Hash exactly the fields rendered below, rather than trusting the
+    # stored proposal_hash column; refuse if they disagree.
+    displayed_hash = recompute_proposal_hash(approval)
+    if displayed_hash is None or displayed_hash != approval.proposal_hash:
+        print(f"refusing to approve {approval.id}: stored proposal does not match its hash "
+              "(record was modified after it was proposed)", file=sys.stderr)
+        raise SystemExit(1)
+
     print(_render(approval))
     print()
 
@@ -108,12 +117,9 @@ async def _approve(store: ApprovalStore, approval_id: str, decided_by: str) -> N
             print("aborted -- not approved")
             raise SystemExit(1)
 
-    # displayed_hash: the hash of exactly what was rendered above -- since the
-    # render is reconstructed straight from the stored proposal fields, this
-    # IS that hash; there is no separate re-render step that could diverge.
     result = await store.record_decision(
         approval_id=approval.id, decided_by=decided_by, decision="APPROVE",
-        displayed_hash=approval.proposal_hash, channel="cli",
+        displayed_hash=displayed_hash, channel="cli",
     )
     print(f"status: {result.status}")
     if result.status == "PENDING":

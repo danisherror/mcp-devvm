@@ -1,6 +1,6 @@
 # Roadmap
 
-Status against the doc's own build order ([`[0] MCP_SERVER_DEVVM.md`](./%5B0%5D%20MCP_SERVER_DEVVM.md) §26.3).
+Status against the doc's own build order ([`MCP_SERVER_DEVVM.md`](./MCP_SERVER_DEVVM.md) §26.3).
 See [ARCHITECTURE.md](./ARCHITECTURE.md) for how the pieces below actually
 talk to each other, and the README's "What's simulated" / "What's real"
 sections for the honest accounting behind each line here.
@@ -87,13 +87,14 @@ gap discovered later. Both are called out again below because the
    - at minimum, state in the docs that the guarantee assumes an agent
      with no shell access.
    **Priority: highest. This is the core security promise.**
-5. **The proposal hash isn't recomputed at execution.**
-   `server/execution/executor.py` checks `approved_hash ==
-   proposal_hash`, but both are stored columns. It should recompute
-   `common.canonical.proposal_hash(...)` from the stored operation,
-   params, preconditions and manifest version, compare that to
-   `approved_hash`, and add a test that edits `params` in the DB after
-   approval and expects `UNAUTHORIZED`. Small fix: a few lines plus one test.
+5. ~~**The proposal hash isn't recomputed at execution.**~~ **Fixed.**
+   `server/execution/executor.py` and `server/approvals/decide.py` now
+   recompute the hash from the stored fields
+   (`server.proposals.engine.recompute_proposal_hash`) and refuse on
+   mismatch; covered by `tests/unit/test_executor_hash.py`. Remaining
+   limit: the hash is unkeyed, so someone with write access to the DB can
+   forge a consistent row. Closing that depends on #4 (a signed approval
+   or a DB the agent can't write).
 
 ## Not started (Phase 6 — hardening)
 

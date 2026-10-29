@@ -17,6 +17,7 @@ from server.auth.tokens import TokenMinter
 from server.execution.triage import triage_error_code, triage_response
 from server.policy.matrix import PolicyMatrix
 from server.policy.targets import Target
+from server.proposals.engine import recompute_proposal_hash
 from server.registry.client import RegistryClient
 from server.tunnel.devd_client import client_for
 from server.tunnel.manager import HostKeyMismatch, TunnelDown, TunnelManager
@@ -60,7 +61,10 @@ class Executor:
             manifest_version=approval.manifest_version, target_id=approval.target_id, params=approval.params,
         )
 
-        if approval.approved_hash != approval.proposal_hash:
+        # Recompute from the stored fields rather than trusting the stored
+        # hash columns, so a post-approval edit to params/preconditions is caught.
+        recomputed = recompute_proposal_hash(approval)
+        if recomputed is None or not (approval.approved_hash == approval.proposal_hash == recomputed):
             await self._audit.emit("SECURITY_HASH_MISMATCH", approval_id=approval.id)
             return await self._settle(approval, "UNAUTHORIZED", error_code="hash_mismatch")
 

@@ -1,6 +1,6 @@
 # mcp-devvm
 
-A working implementation of the architecture in [`[0] MCP_SERVER_DEVVM.md`](./%5B0%5D%20MCP_SERVER_DEVVM.md):
+A working implementation of the architecture in [`MCP_SERVER_DEVVM.md`](./MCP_SERVER_DEVVM.md):
 an MCP server that lets an AI agent do real work on a dev VM — run tests, switch
 branches, restart services — while being treated as hostile at every step. The
 agent never runs a command. It selects a **typed operation** from a fixed,
@@ -291,11 +291,11 @@ tests/             unit, adversarial (isolation/structural), integration
   operations running without your consent, not arbitrary code. Until
   this is fixed, run the agent without terminal access, or run the
   approval store and CLI as a separate OS user. See ROADMAP, Known gaps #4.
-- **The executor doesn't recompute the proposal hash.**
-  `server/execution/executor.py` compares the stored `approved_hash`
-  against the stored `proposal_hash`, but never re-derives the hash from
-  the stored `params`/`preconditions`. If those fields are edited after
-  approval, nothing detects it. See ROADMAP, Known gaps #5.
+- **The proposal hash is unkeyed.** The executor and `decide.py` now
+  recompute the hash from the stored fields, so editing `params` or
+  `preconditions` after proposal is caught. But anyone who can write the
+  DB can also recompute a matching hash, so this doesn't replace fixing
+  the approval-channel gap above. See ROADMAP, Known gaps #5.
 - Single target, single demo user, roles hardcoded to one principal in
   `config/roles.yaml` — extend that file and `server/main.py`'s
   single-target assumption before treating this as multi-tenant.
