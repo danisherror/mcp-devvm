@@ -1,11 +1,16 @@
 """Approver signing keys (see common/approval_sig.py for why they exist).
 
-    python -m scripts.approver_keys init [--name NAME]
+    python -m scripts.approver_keys init
     python -m scripts.approver_keys list
 
 Each approver gets an Ed25519 keypair:
-  data/approvers/private/<name>.key   private half, encrypted with a passphrase
-  data/approvers/public/<name>.pub    public half, mounted read-only into the VM
+  data/approvers/private/<user>.key   private half, encrypted with a passphrase
+  data/approvers/public/<user>.pub    public half, mounted read-only into the VM
+
+A key is always named after the OS user who creates it, and each user gets
+one key. devd treats `<user>.pub` as belonging to `os:<user>`, so four-eyes
+counts distinct people and can tell when the requester approves their own
+request. A second approver needs their own OS account.
 
 The passphrase is the part the agent can't get: it is never written to disk
 and is typed by the human into `decide approve`. Use a real passphrase, not
@@ -44,7 +49,7 @@ def create_approver_key(name: str, passphrase: str, base: Path = APPROVERS_DIR) 
         raise ValueError("passphrase must not be empty")
     priv_path, pub_path = private_key_path(name, base), public_key_path(name, base)
     if priv_path.exists() or pub_path.exists():
-        raise FileExistsError(f"approver key '{name}' already exists")
+        raise FileExistsError(f"approver key '{name}' already exists (one key per OS user)")
     priv_path.parent.mkdir(parents=True, exist_ok=True)
     pub_path.parent.mkdir(parents=True, exist_ok=True)
     priv_path.parent.chmod(0o700)
@@ -75,15 +80,21 @@ def list_approvers(base: Path = APPROVERS_DIR) -> list[str]:
     return sorted(p.stem for p in priv_dir.glob("*.key")) if priv_dir.is_dir() else []
 
 
-def _default_name() -> str:
-    return getpass.getuser().lower()
+def current_approver_name() -> str:
+    """The approver name for the OS user running this process. Not
+    lower-cased or otherwise changed: it has to equal the user part of the
+    principal id (`os:<user>`, server/auth/principal.py) exactly, or the
+    self-approval check would compare two different strings."""
+    name = getpass.getuser()
+    if not APPROVER_NAME_RE.match(name):
+        raise ValueError(f"OS username '{name}' can't be an approver name (must match {APPROVER_NAME_RE.pattern})")
+    return name
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(prog="python -m scripts.approver_keys")
     sub = parser.add_subparsers(dest="cmd", required=True)
-    p_init = sub.add_parser("init", help="create a new approver key")
-    p_init.add_argument("--name", default=None, help="approver name (default: your OS username)")
+    sub.add_parser("init", help="create the approver key for your OS user")
     sub.add_parser("list", help="list approver keys on this machine")
     args = parser.parse_args()
 
@@ -92,7 +103,11 @@ def main() -> None:
         print("\n".join(names) if names else "no approver keys -- run: python -m scripts.approver_keys init")
         return
 
-    name = args.name or _default_name()
+    try:
+        name = current_approver_name()
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        raise SystemExit(1) from exc
     passphrase = getpass.getpass(f"New passphrase for approver '{name}' (min {MIN_PASSPHRASE_LEN} chars): ")
     if len(passphrase) < MIN_PASSPHRASE_LEN:
         print(f"passphrase too short (need at least {MIN_PASSPHRASE_LEN} characters)", file=sys.stderr)

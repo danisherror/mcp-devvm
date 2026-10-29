@@ -5,9 +5,8 @@ are in [ROADMAP.md](./ROADMAP.md).
 
 ## Security gaps (fix first)
 
-- [ ] **Protect the approval CLI itself.** Approvals are now signed and checked by devd, but an agent that can edit the repo could modify `decide.py` (or `common/approval_sig.py` / `scripts/approver_keys.py`, which it imports) to capture the passphrase. Run `decide` from a copy of all three the agent can't write, or move approver keys to a hardware key / passkey. (ROADMAP Known gap #4)
-- [ ] **Four-eyes counts keys, not people.** One person can create two approver keys (`approver_keys init --name a`, then `--name b`) and approve twice. Tie each key to one OS user, or reword ROADMAP gap #3 to say "distinct keys".
-- [ ] **No self-approval check.** Nothing stops the requester from approving their own request, and since `decided_by` is now `approver:<name>` it can never match `principal_id`, so a naive check would silently pass. Needs a mapping from approver key to user.
+- [ ] **The agent can enroll its own approver key.** `data/approvers/public/` is writable by your OS user and devd reads it live, so an agent that can write files can add `mallory.pub` and sign its own approvals, which bypasses signatures entirely. Move the public keys to a root-owned directory (e.g. under `/opt/mcp-devvm-approve`), make enrolling a key a `sudo` step, and mount that directory into the VM instead.
+- [ ] **The protected `decide` still runs in your shell.** `scripts/install_decide.sh` stops repo edits from reaching the CLI, but an agent can edit your shell startup files (e.g. define a function named `/opt/mcp-devvm-approve/bin/decide`). A hardware key / passkey, or approving from a separate OS account, closes this. (ROADMAP Known gap #4)
 
 ## Bugs (fix before enabling four-eyes)
 
@@ -48,6 +47,10 @@ are in [ROADMAP.md](./ROADMAP.md).
 
 ## Done
 
+- [x] Root-owned copy of the approval CLI: `sudo scripts/install_decide.sh` installs `decide` and `approver-keys` from a reviewed commit into `/opt/mcp-devvm-approve`, run with `python -I`.
+- [x] Four-eyes counts people: approver keys are named after one OS user, one key per user.
+- [x] No self-approval on four-eyes: devd refuses a signature from the requester's key (`self_approval`), and `decide` and the store refuse it first.
+- [x] Fix `decide list` crashing with `'async_generator' object is not iterable`.
 - [x] Signed human approvals, verified by devd: a forged DB row or a stolen token key can't run anything that needs approval (ROADMAP Known gap #4).
 - [x] SSH tunnel account can no longer forward ports: all forwarding off, every session forced into a pipe to devd's socket (ROADMAP Known gap #1).
 - [x] Several users and targets: `target_id` on the MCP tools, `list_targets`, per-user step-up, separate approver keys (ROADMAP Known gap #3).

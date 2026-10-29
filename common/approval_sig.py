@@ -14,6 +14,17 @@ write them. So neither one can be what proves a human said yes. Instead:
     effect hash from its own manifest and the request, then verifies the
     signatures. No valid signature means nothing runs.
 
+Each approver key belongs to exactly one OS user: the key is named after
+the user (`alice.pub` is user `os:alice`), and `approver_keys init` only
+creates a key for the user running it. That gives four-eyes two rules devd
+can check on its own:
+  - two approvals means two different users, not two keys of one person;
+  - the requester can't be one of them. The requester is bound into the
+    proposal hash the human signed, so it can't be swapped afterwards.
+For single-approval operations the requester may approve: in the local
+topology the agent runs as the human's own OS user, so the requester is
+always the person approving.
+
 Shared by both planes: the server signs with it, devd verifies with it.
 """
 
@@ -41,6 +52,11 @@ DEFAULT_TTL_S = 600
 FOUR_EYES_RISKS = frozenset({"DESTRUCTIVE", "PRIVILEGE"})
 
 APPROVER_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,62}$")
+
+
+def approver_user(approver: str) -> str:
+    """The principal (`os:<user>`) an approver key belongs to."""
+    return f"os:{approver}"
 
 
 class ApprovalSignatureError(Exception):
@@ -98,12 +114,16 @@ def sign_approval(
 
 def verify_approvals(
     signed: list[dict[str, Any]], *, public_keys: dict[str, Ed25519PublicKey], approval_id: str,
-    proposal_hash: str, effect_hash: str, required: int, now: float | None = None,
+    proposal_hash: str, effect_hash: str, required: int, requester: str, now: float | None = None,
 ) -> list[str]:
     """Returns the distinct approvers whose signatures verified. Raises
     ApprovalSignatureError unless at least `required` distinct approvers did.
     Invalid entries are not skipped silently: any bad signature fails the
-    whole request, since a forged entry is itself a security event."""
+    whole request, since a forged entry is itself a security event.
+
+    When `required` > 1 (four-eyes), a signature by the requester's own key
+    is refused too, so the requester can neither approve nor fill one of
+    the two slots."""
     now = now if now is not None else time.time()
     approvers: set[str] = set()
     for raw in signed:
@@ -121,6 +141,8 @@ def verify_approvals(
             key.verify(base64.b64decode(sa.sig, validate=True), msg)
         except (InvalidSignature, ValueError) as exc:
             raise ApprovalSignatureError(f"bad_approval_signature:{sa.approver}") from exc
+        if required > 1 and approver_user(sa.approver) == requester:
+            raise ApprovalSignatureError(f"self_approval:{sa.approver}")
         approvers.add(sa.approver)
     if len(approvers) < required:
         raise ApprovalSignatureError(f"approval_signatures_required:{required}:got:{len(approvers)}")

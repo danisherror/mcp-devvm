@@ -118,6 +118,27 @@ async def test_four_eyes_same_human_approving_twice_counts_once(store):
 
 
 @pytest.mark.asyncio
+async def test_requester_cannot_approve_own_four_eyes_request(store):
+    approval = await _make_pending(store, principal_id="os:alice", approvals_required=2)
+    with pytest.raises(IllegalTransition, match="requester"):
+        await store.record_decision(approval_id=approval.id, decided_by="os:alice", decision="APPROVE",
+                                     displayed_hash="ph1", channel="cli")
+    # DESTRUCTIVE is four-eyes even if the row says 1, matching devd.
+    destructive = await _make_pending(store, request_id="req_2", principal_id="os:alice", risk_class="DESTRUCTIVE")
+    with pytest.raises(IllegalTransition, match="requester"):
+        await store.record_decision(approval_id=destructive.id, decided_by="os:alice", decision="APPROVE",
+                                     displayed_hash="ph1", channel="cli")
+
+
+@pytest.mark.asyncio
+async def test_requester_may_approve_single_approval(store):
+    approval = await _make_pending(store, principal_id="os:alice")
+    result = await store.record_decision(approval_id=approval.id, decided_by="os:alice", decision="APPROVE",
+                                          displayed_hash="ph1", channel="cli")
+    assert result.status == "APPROVED"
+
+
+@pytest.mark.asyncio
 async def test_expired_decision_window_rejects_decision(store):
     approval = await _make_pending(store, ttl_seconds=-1)  # already expired
     with pytest.raises(IllegalTransition):

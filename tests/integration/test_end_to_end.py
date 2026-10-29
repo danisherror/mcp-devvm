@@ -17,7 +17,7 @@ import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
-from common.approval_sig import effect_hash, sign_approval
+from common.approval_sig import approver_user, effect_hash, sign_approval
 from server.proposals.engine import recompute_proposal_hash
 
 from server.approvals.store import ApprovalStore
@@ -139,7 +139,7 @@ async def _approve(store: ApprovalStore, approval_id: str) -> None:
     h = recompute_proposal_hash(approval)
     signed = sign_approval(key, approver=name, approval_id=approval_id, proposal_hash=h,
                            effect_hash=effect_hash(approval.effect_summary))
-    await store.record_decision(approval_id=approval_id, decided_by=f"approver:{name}", decision="APPROVE",
+    await store.record_decision(approval_id=approval_id, decided_by=approver_user(name), decision="APPROVE",
                                  displayed_hash=h, channel="test", signature=signed.as_dict())
 
 

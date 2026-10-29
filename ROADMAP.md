@@ -71,7 +71,9 @@ gap discovered later. Both are called out again below because the
 3. ~~**Single target, single user.**~~ **Fixed in code.** The MCP tools
    take an optional `target_id` (`list_targets` shows the ones you may
    use; others look nonexistent), step-up is tracked per user, and each
-   approver has their own key, so four-eyes counts distinct people.
+   approver key is named after one OS user (one key per user), so
+   four-eyes counts distinct people, and devd refuses a four-eyes
+   approval signed by the requester (`self_approval`).
    Remaining: `scripts/setup_dev_vm.py` provisions one demo target only,
    and `config/roles.yaml` still ships a single example user.
 4. **The agent can reach the approval channel in the local topology.**
@@ -83,9 +85,14 @@ gap discovered later. Both are called out again below because the
    signature. So a forged DB row or a stolen token-signing key is no
    longer enough (`TestApprovalSignatures`, `tests/unit/test_approval_sig.py`).
    devd also requires two distinct approvers for `DESTRUCTIVE`/`PRIVILEGE`
-   on its own. **Still open:** `decide.py` lives in a repo the agent can
-   edit, so a modified copy could capture the passphrase; run it from a
-   copy the agent can't write, or move to a hardware key. Original
+   on its own. `sudo scripts/install_decide.sh` installs a root-owned copy
+   of the CLI from a reviewed commit, run in isolated mode, so editing the
+   repo no longer changes the code that asks for the passphrase.
+   **Still open:** that copy runs as your OS user, in a shell whose
+   startup files the agent can edit; and `data/approvers/public/` is
+   writable by your OS user, so an agent can enroll a key of its own
+   (TODO.md). A hardware key or a separate approver OS account closes
+   both. Original
    finding, for context: found in review, not by testing. `server/approvals/decide.py` runs as
    the same OS user as the MCP server, and `data/approvals.db` is
    readable and writable by that user. Any agent with a terminal tool can
