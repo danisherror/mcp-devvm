@@ -6,7 +6,6 @@ are in [ROADMAP.md](./ROADMAP.md).
 ## Security gaps (fix first)
 
 - [ ] **The protected `decide` still runs in your shell.** `scripts/install_decide.sh` stops repo edits from reaching the CLI, but an agent can edit your shell startup files (e.g. define a function named `/opt/mcp-devvm-approve/bin/decide`). A hardware key / passkey, or approving from a separate OS account, closes this. (ROADMAP Known gap #4)
-- [ ] **Pin the installer's dependencies by hash.** `scripts/install_decide.sh` pins versions and installs wheels only, but takes whatever PyPI serves for those versions. Use `pip install --require-hashes` with a checked-in requirements file.
 
 ## Robustness (small)
 
@@ -41,6 +40,7 @@ are in [ROADMAP.md](./ROADMAP.md).
 
 ## Done
 
+- [x] `install_decide.sh` installs its dependencies with `pip --require-hashes` from `scripts/requirements/decide.txt`, read from the commit being installed.
 - [x] The tunnel's local socket is bound under a `0177` umask, so it is never connectable by other users, even briefly.
 - [x] The tunnel bridge waits for the SSH channel (`drain()`) before reading more, so a large request isn't buffered fully in memory.
 - [x] Approver signatures last until the approval's deadline plus the 120s execution window, so the first four-eyes signature can't expire before the second approver signs.

@@ -35,8 +35,11 @@ REF=${1:-HEAD}
 REPO=$(cd "$(dirname "$0")/.." && pwd -P)
 KEYS_DIR=/etc/mcp-devvm/approvers
 
-# Pinned and wheel-only, so pip never runs a package's build script as root.
-DEPS="cryptography==50.0.1 aiosqlite==0.22.1 pyyaml==6.0.3"
+# Dependencies come from scripts/requirements/decide.txt in the commit being
+# installed: every package (including sub-dependencies) pinned by version and
+# sha256, so pip refuses anything PyPI serves that doesn't match. Wheel-only,
+# so pip never runs a package's build script as root.
+REQUIREMENTS=scripts/requirements/decide.txt
 
 die() { echo "install_decide: $*" >&2; exit 1; }
 
@@ -93,8 +96,9 @@ as_user /usr/bin/git -C "$REPO" archive --format=tar "$COMMIT" common server scr
   | tar -x -C "$STAGE/src" -f -
 
 "$PYTHON" -I -m venv "$STAGE/venv"
+[ -f "$STAGE/src/$REQUIREMENTS" ] || die "commit $COMMIT has no $REQUIREMENTS"
 "$STAGE/venv/bin/python" -I -m pip install --quiet --disable-pip-version-check \
-  --no-cache-dir --only-binary=:all: $DEPS
+  --no-cache-dir --only-binary=:all: --no-deps --require-hashes -r "$STAGE/src/$REQUIREMENTS"
 
 cat > "$STAGE/launch.py" <<EOF
 import runpy
