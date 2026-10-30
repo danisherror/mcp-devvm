@@ -203,7 +203,7 @@ production posture:
   KMS. The doc's own fallback ladder for topology-A-without-CA-infra
   explicitly allows this.
 - **Approver keys are passphrase-encrypted files, not hardware keys.**
-  `data/approvers/private/<name>.key` is readable by your OS user, so the
+  `~/.mcp-devvm/approver/<name>.key` is readable by your OS user, so the
   passphrase is what protects it. A hardware key or passkey would remove
   the file entirely; see Known limitations.
 - **`devd`'s mutating-call handling runs synchronously**, not backgrounded

@@ -7,10 +7,6 @@ are in [ROADMAP.md](./ROADMAP.md).
 
 - [ ] **The protected `decide` still runs in your shell.** `scripts/install_decide.sh` stops repo edits from reaching the CLI, but an agent can edit your shell startup files (e.g. define a function named `/opt/mcp-devvm-approve/bin/decide`). A hardware key / passkey, or approving from a separate OS account, closes this. (ROADMAP Known gap #4)
 
-## Robustness (small)
-
-- [ ] **Second approvers on one machine.** `sudo approver-keys enroll --user bob` reads `data/approvers/private/bob.key` from this repo, so every approver's private key has to sit in one user's checkout. Let each user keep theirs in their own home directory.
-
 ## Quick wins (no new infrastructure)
 
 - [ ] **CI:** run `tests/unit` and `tests/adversarial` on every push; integration tests where Docker is available.
@@ -40,6 +36,7 @@ are in [ROADMAP.md](./ROADMAP.md).
 
 ## Done
 
+- [x] Approver private keys live in each user's home (`~/.mcp-devvm/approver/<user>.key`), so several approvers can share a machine; `enroll` as root reads them without following symlinks and checks the file belongs to that user. Old keys in `data/approvers/private/` still work.
 - [x] `install_decide.sh` installs its dependencies with `pip --require-hashes` from `scripts/requirements/decide.txt`, read from the commit being installed.
 - [x] The tunnel's local socket is bound under a `0177` umask, so it is never connectable by other users, even briefly.
 - [x] The tunnel bridge waits for the SSH channel (`drain()`) before reading more, so a large request isn't buffered fully in memory.

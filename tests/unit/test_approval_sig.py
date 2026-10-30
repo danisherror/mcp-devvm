@@ -318,3 +318,57 @@ class TestDevdEnforcement:
                             "manifest_version": op.version, "manifest_hash": op.content_hash},
                       headers={"Authorization": f"Bearer {tok}", "Idempotency-Key": "direct_y"})
         assert resp.status_code != 403
+
+
+class TestKeyLocation:
+    """Each approver's key lives in their own home directory."""
+
+    @pytest.fixture
+    def homes(self, tmp_path, monkeypatch):
+        import os
+        import pwd
+
+        import scripts.approver_keys as ak
+
+        def fake_getpwnam(name):
+            if name not in ("alice", "bob"):
+                raise KeyError(name)
+            return type("P", (), {"pw_dir": str(tmp_path / "home" / name), "pw_uid": os.getuid()})()
+
+        monkeypatch.setattr(pwd, "getpwnam", fake_getpwnam)
+        monkeypatch.setattr(ak, "LEGACY_APPROVERS_DIR", tmp_path / "repo" / "data" / "approvers")
+        return tmp_path
+
+    def test_new_keys_go_in_the_users_home(self, homes):
+        from scripts.approver_keys import private_key_path
+
+        path = create_approver_key("bob", "correct horse battery")
+        assert path == homes / "home" / "bob" / ".mcp-devvm" / "approver" / "bob.key"
+        assert private_key_path("bob") == path
+        assert (path.parent.stat().st_mode & 0o777) == 0o700
+        assert load_private_key("bob", "correct horse battery") is not None
+
+    def test_old_repo_key_is_still_found(self, homes):
+        from scripts.approver_keys import private_key_path
+
+        legacy = create_approver_key("alice", "correct horse battery", homes / "repo" / "data" / "approvers")
+        assert private_key_path("alice") == legacy
+        with pytest.raises(FileExistsError):
+            create_approver_key("alice", "correct horse battery")  # still one key per user
+
+    def test_symlinked_key_is_refused(self, homes):
+        from scripts.approver_keys import home_key_path
+
+        real = create_approver_key("alice", "correct horse battery", homes / "elsewhere")
+        link = home_key_path("alice")
+        link.parent.mkdir(parents=True)
+        link.symlink_to(real)
+        with pytest.raises(OSError):
+            load_private_key("alice", "correct horse battery")
+
+    def test_key_owned_by_someone_else_is_refused(self, homes):
+        import os
+
+        create_approver_key("bob", "correct horse battery")
+        with pytest.raises(ValueError, match="not owned"):
+            load_private_key("bob", "correct horse battery", owner_uid=os.getuid() + 1)

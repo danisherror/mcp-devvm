@@ -43,8 +43,8 @@ from scripts.approver_keys import (
     TRUSTED_PUBLIC_DIR,
     current_approver_name,
     enrolled_key_matches,
-    list_approvers,
     load_private_key,
+    private_key_path,
     trusted_key_path,
 )
 from server.auth.principal import resolve_local_principal
@@ -123,7 +123,7 @@ def _my_approver_name() -> str:
     except ValueError as exc:
         print(str(exc), file=sys.stderr)
         raise SystemExit(1) from exc
-    if name not in list_approvers():
+    if not private_key_path(name).is_file():
         print(f"no approver key for OS user '{name}' -- create one with: approver-keys init", file=sys.stderr)
         raise SystemExit(1)
     if not trusted_key_path(name).is_file():
