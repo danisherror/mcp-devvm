@@ -34,7 +34,7 @@ gap discovered later. Both are called out again below because the
 - [x] Token minting + devd-side verification, operation-scoped — `server/auth/tokens.py`, `devd/auth.py`
 - [x] Approval store + atomic CAS claim, tested under real concurrency — `server/approvals/store.py`, `tests/unit/test_approval_store.py::test_two_workers_race_to_claim_exactly_one_wins`
 - [x] Audit: intent/outcome, hash chain, write-only sink — `server/audit/`
-- [ ] Cross-plane correlation report ("a devd run with no matching approval," §18.4) — not built; would need to parse devd's local run records against the server's approval store
+- [x] Cross-plane correlation report ("a devd run with no matching approval," §18.4) — `python -m scripts.correlate --container mcp-devvm-dev-vm` (or `--runs-dir` for a shipped copy); exits 1 on any finding. Not yet scheduled, and the auditd half of §18.4 (execve outside a sandbox) needs auditd first
 
 ### Phase 3 — Read-only MCP surface
 - [x] `list_targets`, `list_operations`, `describe_target`, `run_operation`, with an optional `target_id` for multiple VMs — `server/tools/mcp_app.py`

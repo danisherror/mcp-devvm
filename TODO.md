@@ -7,10 +7,6 @@ are in [ROADMAP.md](./ROADMAP.md).
 
 - [ ] **The protected `decide` still runs in your shell.** `scripts/install_decide.sh` stops repo edits from reaching the CLI, but an agent can edit your shell startup files (e.g. define a function named `/opt/mcp-devvm-approve/bin/decide`). A hardware key / passkey, or approving from a separate OS account, closes this. (ROADMAP Known gap #4)
 
-## Quick wins (no new infrastructure)
-
-- [ ] **Cross-plane correlation report:** flag any devd run with no matching approval (doc §18.4).
-
 ## Features
 
 - [ ] **`NETWORK_EXEC` operations** (`npm install`, running tests) with a per-run container sandbox (doc §14.3).
@@ -34,6 +30,7 @@ are in [ROADMAP.md](./ROADMAP.md).
 
 ## Done
 
+- [x] Cross-plane correlation report: `python -m scripts.correlate --container mcp-devvm-dev-vm` flags any devd run the server's approvals don't explain (doc §18.4). Run it on a schedule; the auditd half needs auditd.
 - [x] Root-only paths tested as root in an Ubuntu container (`tests/root/`, also in CI). This found two bugs that stopped `install_decide.sh` from running on Linux at all: it read file owners with BSD `stat` syntax, and treated the `/usr/bin/python3` symlink as world-writable.
 - [x] CI (`.github/workflows/ci.yml`): unit and adversarial tests on every push and PR (Python 3.11 and 3.12), integration tests against the dev-VM container.
 - [x] Approver private keys live in each user's home (`~/.mcp-devvm/approver/<user>.key`), so several approvers can share a machine; `enroll` as root reads them without following symlinks and checks the file belongs to that user. Old keys in `data/approvers/private/` still work.
