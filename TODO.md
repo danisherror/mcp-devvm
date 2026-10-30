@@ -9,7 +9,6 @@ are in [ROADMAP.md](./ROADMAP.md).
 
 ## Quick wins (no new infrastructure)
 
-- [ ] **CI:** run `tests/unit` and `tests/adversarial` on every push; integration tests where Docker is available.
 - [ ] **Cross-plane correlation report:** flag any devd run with no matching approval (doc §18.4).
 - [ ] **Test the root-only paths:** `install_decide.sh` and `approver-keys enroll` were only tested without root. Run them as root in a Linux CI container.
 
@@ -36,6 +35,7 @@ are in [ROADMAP.md](./ROADMAP.md).
 
 ## Done
 
+- [x] CI (`.github/workflows/ci.yml`): unit and adversarial tests on every push and PR (Python 3.11 and 3.12), integration tests against the dev-VM container.
 - [x] Approver private keys live in each user's home (`~/.mcp-devvm/approver/<user>.key`), so several approvers can share a machine; `enroll` as root reads them without following symlinks and checks the file belongs to that user. Old keys in `data/approvers/private/` still work.
 - [x] `install_decide.sh` installs its dependencies with `pip --require-hashes` from `scripts/requirements/decide.txt`, read from the commit being installed.
 - [x] The tunnel's local socket is bound under a `0177` umask, so it is never connectable by other users, even briefly.
