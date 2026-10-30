@@ -43,3 +43,12 @@ jobs:
       - name: dev-VM logs on failure
         if: failure()
         run: docker logs mcp-devvm-dev-vm 2>&1 | tail -200
+
+  root-paths:
+    name: Root-only paths (install_decide.sh, approver-keys enroll)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: sh tests/root/run_in_container.sh

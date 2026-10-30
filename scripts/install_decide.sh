@@ -56,18 +56,29 @@ check_root_owned() {
   p=$1
   while :; do
     [ -e "$p" ] || die "$p does not exist"
-    owner=$(stat -f %u "$p" 2>/dev/null || stat -c %u "$p")
-    mode=$(stat -f %Lp "$p" 2>/dev/null || stat -c %a "$p")
+    # GNU stat (-c) first: GNU also accepts -f, but it means "file system
+    # status" there and prints the wrong thing. BSD/macOS stat rejects -c.
+    owner=$(stat -c %u "$p" 2>/dev/null || stat -f %u "$p")
+    mode=$(stat -c %a "$p" 2>/dev/null || stat -f %Lp "$p")
     [ "$owner" = 0 ] || die "$p is not owned by root -- the agent could replace it"
-    case $mode in
-      *[2367]? | *[2367]) die "$p is group- or world-writable" ;;
-    esac
+    # A symlink's own mode is always 777 and means nothing; its target is
+    # checked separately.
+    if [ ! -L "$p" ]; then
+      case $mode in
+        *[2367]? | *[2367]) die "$p is group- or world-writable" ;;
+      esac
+    fi
     [ "$p" = / ] && break
     p=$(dirname "$p")
   done
 }
 
-[ "${MCP_DECIDE_TEST:-}" = 1 ] || check_root_owned "$PYTHON"
+# /usr/bin/python3 is often a symlink: check the link and the file it
+# resolves to, each with every directory above it.
+if [ "${MCP_DECIDE_TEST:-}" != 1 ]; then
+  check_root_owned "$PYTHON"
+  check_root_owned "$(realpath "$PYTHON")"
+fi
 "$PYTHON" -I -c 'import sys; sys.exit(sys.version_info < (3, 9))' \
   || die "$PYTHON is older than 3.9"
 

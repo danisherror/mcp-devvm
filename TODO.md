@@ -10,7 +10,6 @@ are in [ROADMAP.md](./ROADMAP.md).
 ## Quick wins (no new infrastructure)
 
 - [ ] **Cross-plane correlation report:** flag any devd run with no matching approval (doc §18.4).
-- [ ] **Test the root-only paths:** `install_decide.sh` and `approver-keys enroll` were only tested without root. Run them as root in a Linux CI container.
 
 ## Features
 
@@ -35,6 +34,7 @@ are in [ROADMAP.md](./ROADMAP.md).
 
 ## Done
 
+- [x] Root-only paths tested as root in an Ubuntu container (`tests/root/`, also in CI). This found two bugs that stopped `install_decide.sh` from running on Linux at all: it read file owners with BSD `stat` syntax, and treated the `/usr/bin/python3` symlink as world-writable.
 - [x] CI (`.github/workflows/ci.yml`): unit and adversarial tests on every push and PR (Python 3.11 and 3.12), integration tests against the dev-VM container.
 - [x] Approver private keys live in each user's home (`~/.mcp-devvm/approver/<user>.key`), so several approvers can share a machine; `enroll` as root reads them without following symlinks and checks the file belongs to that user. Old keys in `data/approvers/private/` still work.
 - [x] `install_decide.sh` installs its dependencies with `pip --require-hashes` from `scripts/requirements/decide.txt`, read from the commit being installed.
