@@ -11,12 +11,14 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from common.approval_sig import (
+    EXECUTION_WINDOW_S,
     ApprovalSignatureError,
     approver_user,
     effect_hash,
     load_public_keys,
     required_approvers,
     sign_approval,
+    signature_deadline,
     verify_approvals,
 )
 from scripts.approver_keys import (
@@ -118,6 +120,24 @@ class TestVerify:
         with pytest.raises(ApprovalSignatureError, match="malformed"):
             _verify([{"approver": "alice"}], {"alice": alice.public_key()})
 
+    def test_signature_outlives_the_approval_window(self, alice, bob):
+        # Four-eyes: alice signs as soon as the request opens (900s window),
+        # bob signs at the last second, and the run starts at the end of the
+        # execution window. alice's signature must still be valid then.
+        opened = time.time() - 900 - EXECUTION_WINDOW_S
+        expires_at = opened + 900
+        deadline = signature_deadline(expires_at)
+        first = _sign(alice, not_after=deadline, now=opened)
+        second = _sign(bob, "bob", not_after=deadline, now=expires_at)
+        keys = {"alice": alice.public_key(), "bob": bob.public_key()}
+        assert _verify([first, second], keys, required=2) == ["alice", "bob"]
+
+    def test_signature_expires_after_the_execution_window(self, alice):
+        expires_at = time.time() - EXECUTION_WINDOW_S - 10
+        signed = _sign(alice, not_after=signature_deadline(expires_at))
+        with pytest.raises(ApprovalSignatureError, match="expired"):
+            _verify([signed], {"alice": alice.public_key()})
+
     def test_destructive_always_needs_two(self):
         assert required_approvers("MUTATING_LOCAL") == 1
         assert required_approvers("DESTRUCTIVE") == 2
@@ -134,6 +154,14 @@ class TestKeyFiles:
         assert enrolled_key_matches("alice", key, trusted)
         signed = sign_approval(key, approver="alice", approval_id=APPROVAL_ID, proposal_hash=PHASH, effect_hash=EHASH)
         assert _verify([signed.as_dict()], load_public_keys(trusted)) == ["alice"]
+
+    def test_malformed_public_key_is_skipped(self, tmp_path, caplog):
+        trusted = tmp_path / "trusted"
+        create_approver_key("alice", "correct horse battery", tmp_path)
+        enroll_approver_key("alice", "correct horse battery", base=tmp_path, trusted=trusted)
+        (trusted / "bob.pub").write_text("not a key")
+        assert set(load_public_keys(trusted)) == {"alice"}
+        assert "bob.pub" in caplog.text
 
     def test_init_does_not_make_the_key_trusted(self, tmp_path):
         create_approver_key("alice", "correct horse battery", tmp_path)

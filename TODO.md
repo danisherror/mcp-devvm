@@ -8,14 +8,8 @@ are in [ROADMAP.md](./ROADMAP.md).
 - [ ] **The protected `decide` still runs in your shell.** `scripts/install_decide.sh` stops repo edits from reaching the CLI, but an agent can edit your shell startup files (e.g. define a function named `/opt/mcp-devvm-approve/bin/decide`). A hardware key / passkey, or approving from a separate OS account, closes this. (ROADMAP Known gap #4)
 - [ ] **Pin the installer's dependencies by hash.** `scripts/install_decide.sh` pins versions and installs wheels only, but takes whatever PyPI serves for those versions. Use `pip install --require-hashes` with a checked-in requirements file.
 
-## Bugs (fix before enabling four-eyes)
-
-- [ ] **First signature can expire before the second approver signs.** Signatures last 600s (`common/approval_sig.py` `DEFAULT_TTL_S`), but approvals stay open up to 900s (`TTL_FOR` in `server/services/operation_service.py`). devd then refuses the run as `UNAUTHORIZED`. Set `not_after` from `approval.expires_at` + the 120s execution window instead of a fixed TTL.
-- [ ] **Server and devd disagree on required approvers.** devd always requires 2 for `DESTRUCTIVE`/`PRIVILEGE`; the server only asks for 2 when policy sets `require_four_eyes`. Compute `approvals_required` with `required_approvers(op.risk, ...)` on the server too, so it never marks APPROVED with fewer signatures than devd will accept.
-
 ## Robustness (small)
 
-- [ ] **A malformed `.pub` file breaks every approval.** `load_public_keys` raises, devd returns 500, and the run goes `UNKNOWN` → `NEEDS_HUMAN`. Skip the bad file with a warning instead.
 - [ ] **Tunnel socket permissions race.** `server/tunnel/manager.py` creates the local socket and then chmods it to `0600`; set a restrictive umask before creating it.
 - [ ] **No backpressure in the tunnel bridge.** `_bridge` writes to `proc.stdin` without draining, so a large request buffers fully in memory.
 - [ ] **Second approvers on one machine.** `sudo approver-keys enroll --user bob` reads `data/approvers/private/bob.key` from this repo, so every approver's private key has to sit in one user's checkout. Let each user keep theirs in their own home directory.
@@ -49,6 +43,9 @@ are in [ROADMAP.md](./ROADMAP.md).
 
 ## Done
 
+- [x] Approver signatures last until the approval's deadline plus the 120s execution window, so the first four-eyes signature can't expire before the second approver signs.
+- [x] The server asks for as many approvers as devd (`required_approvers()`): DESTRUCTIVE always needs two, whatever the policy file says, and the store won't mark APPROVED with fewer.
+- [x] A malformed approver `.pub` file is skipped with a warning instead of failing every approval.
 - [x] Approver keys are enrolled by root: devd trusts only the root-owned `/etc/mcp-devvm/approvers/`, `sudo approver-keys enroll` derives the public key from the passphrase-unlocked private key, and `setup_dev_vm.py` refuses a user-writable key directory (except `--test-approvers`).
 - [x] Root-owned copy of the approval CLI: `sudo scripts/install_decide.sh` installs `decide` and `approver-keys` from a reviewed commit into `/opt/mcp-devvm-approve`, run with `python -I`.
 - [x] Four-eyes counts people: approver keys are named after one OS user, one key per user.

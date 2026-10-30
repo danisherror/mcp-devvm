@@ -32,6 +32,7 @@ Shared by both planes: the server signs with it, devd verifies with it.
 from __future__ import annotations
 
 import base64
+import logging
 import re
 import time
 from dataclasses import dataclass
@@ -47,6 +48,12 @@ from common.canonical import canonicalize, content_hash
 STATEMENT_KIND = "mcp-devvm-approval"
 STATEMENT_VERSION = 1
 DEFAULT_TTL_S = 600
+
+# How long an APPROVED request may wait to start running. The store sets it
+# when the last approval arrives; signatures must stay valid until then.
+EXECUTION_WINDOW_S = 120
+
+log = logging.getLogger(__name__)
 
 # Risk classes that need two distinct human approvers no matter what the
 # control plane's policy file says (devd enforces this on its own).
@@ -102,9 +109,13 @@ def statement_bytes(*, approval_id: str, proposal_hash: str, effect_hash: str, a
 
 def sign_approval(
     private_key: Ed25519PrivateKey, *, approver: str, approval_id: str, proposal_hash: str,
-    effect_hash: str, ttl_s: int = DEFAULT_TTL_S, now: float | None = None,
+    effect_hash: str, ttl_s: int = DEFAULT_TTL_S, not_after: int | None = None, now: float | None = None,
 ) -> SignedApproval:
-    not_after = int(now if now is not None else time.time()) + ttl_s
+    """`not_after` wins over `ttl_s` when given. `decide` passes the
+    approval's own deadline (see signature_deadline), so the first of two
+    four-eyes signatures can't expire while the request is still open."""
+    if not_after is None:
+        not_after = int(now if now is not None else time.time()) + ttl_s
     msg = statement_bytes(
         approval_id=approval_id, proposal_hash=proposal_hash, effect_hash=effect_hash,
         approver=approver, not_after=not_after,
@@ -150,6 +161,13 @@ def verify_approvals(
     return sorted(approvers)
 
 
+def signature_deadline(approval_expires_at: float) -> int:
+    """The latest moment a signature on this approval can be needed: the
+    last approval may arrive just before the decision window closes, and the
+    run then has EXECUTION_WINDOW_S to start."""
+    return int(approval_expires_at) + EXECUTION_WINDOW_S + 1
+
+
 def required_approvers(risk: str, requested: int = 1) -> int:
     floor = 2 if risk in FOUR_EYES_RISKS else 1
     return max(floor, requested)
@@ -157,7 +175,10 @@ def required_approvers(risk: str, requested: int = 1) -> int:
 
 def load_public_keys(directory: Path) -> dict[str, Ed25519PublicKey]:
     """`<approver>.pub` files in PEM form. Read fresh on every call so a key
-    added or removed on the VM takes effect without restarting devd."""
+    added or removed on the VM takes effect without restarting devd.
+
+    A file that can't be read or isn't an Ed25519 public key is skipped with
+    a warning, so one bad file doesn't block every other approver."""
     keys: dict[str, Ed25519PublicKey] = {}
     if not directory.is_dir():
         return keys
@@ -165,7 +186,13 @@ def load_public_keys(directory: Path) -> dict[str, Ed25519PublicKey]:
         name = path.stem
         if not APPROVER_NAME_RE.match(name):
             continue
-        key = serialization.load_pem_public_key(path.read_bytes())
-        if isinstance(key, Ed25519PublicKey):
-            keys[name] = key
+        try:
+            key = serialization.load_pem_public_key(path.read_bytes())
+        except (OSError, ValueError, TypeError) as exc:
+            log.warning("skipping unreadable approver key %s: %s", path, exc)
+            continue
+        if not isinstance(key, Ed25519PublicKey):
+            log.warning("skipping approver key %s: not an Ed25519 public key", path)
+            continue
+        keys[name] = key
     return keys

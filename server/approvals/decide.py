@@ -32,7 +32,13 @@ import sys
 from pathlib import Path
 
 from server.approvals.store import Approval, ApprovalStore
-from common.approval_sig import approver_user, effect_hash, required_approvers, sign_approval
+from common.approval_sig import (
+    approver_user,
+    effect_hash,
+    required_approvers,
+    sign_approval,
+    signature_deadline,
+)
 from scripts.approver_keys import (
     TRUSTED_PUBLIC_DIR,
     current_approver_name,
@@ -181,6 +187,7 @@ async def _approve(store: ApprovalStore, approval_id: str) -> None:
     signed = sign_approval(
         key, approver=approver_name, approval_id=approval.id,
         proposal_hash=displayed_hash, effect_hash=effect_hash(approval.effect_summary),
+        not_after=signature_deadline(approval.expires_at),
     )
     # decided_by is the key owner's principal id, so the store can compare it
     # with principal_id and count distinct people, like devd does.

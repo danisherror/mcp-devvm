@@ -15,7 +15,7 @@ from typing import Any
 
 import aiosqlite
 
-from common.approval_sig import required_approvers
+from common.approval_sig import EXECUTION_WINDOW_S, required_approvers
 from server.approvals.state_machine import IllegalTransition, validate_transition
 
 SCHEMA = """
@@ -232,8 +232,8 @@ class ApprovalStore:
         row = await cur.fetchone()
         approve_count = row["n"]
 
-        if approve_count >= approval.approvals_required:
-            approved_expires_at = time.time() + 120  # execution window
+        if approve_count >= required_approvers(approval.risk_class, approval.approvals_required):
+            approved_expires_at = time.time() + EXECUTION_WINDOW_S
             await self.db.execute(
                 "UPDATE approvals SET status='APPROVED', approved_hash=?, approved_expires_at=?, decided_at=? "
                 "WHERE id=? AND status='PENDING'",
