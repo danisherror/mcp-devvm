@@ -159,3 +159,18 @@ async def test_settle_on_already_settled_approval_rejected(store):
 
     with pytest.raises(IllegalTransition):
         await store.settle(approval.id, "SUCCEEDED", run_id="run_2")  # idempotent no-op, not a re-settle
+
+
+@pytest.mark.asyncio
+async def test_destructive_needs_two_approvals_even_if_row_says_one(store):
+    # devd always wants two signatures for DESTRUCTIVE; the store must not
+    # mark APPROVED with one, whatever approvals_required says.
+    approval = await _make_pending(store, risk_class="DESTRUCTIVE", approvals_required=1)
+    result = await store.record_decision(
+        approval_id=approval.id, decided_by="os:alice", decision="APPROVE", displayed_hash="ph1", channel="cli",
+    )
+    assert result.status == "PENDING"
+    result = await store.record_decision(
+        approval_id=approval.id, decided_by="os:bob", decision="APPROVE", displayed_hash="ph1", channel="cli",
+    )
+    assert result.status == "APPROVED"

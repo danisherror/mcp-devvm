@@ -70,3 +70,47 @@ def test_old_single_user_step_up_file_is_ignored(tmp_path):
     path = tmp_path / "step_up.state"
     path.write_text("os:alice:1700000000.0")
     assert StepUpStore(path).last_auth_time("os:alice") == 0.0
+
+
+@pytest.mark.parametrize("risk,expected", [("MUTATING_LOCAL", 1), ("DESTRUCTIVE", 2)])
+@pytest.mark.asyncio
+async def test_server_asks_for_as_many_approvers_as_devd(risk, expected):
+    """Policy here never asks for four-eyes, but devd always requires two
+    approvers for DESTRUCTIVE, so the server must too. (PRIVILEGE is never
+    grantable, so it never gets this far.)"""
+    import dataclasses
+    from pathlib import Path
+
+    import yaml
+
+    from common.manifest import manifest_from_yaml_dict
+
+    ops = Path(__file__).resolve().parents[2] / "devd" / "operations"
+    op = manifest_from_yaml_dict(
+        yaml.safe_load((ops / "git_checkout.yaml").read_text()), impl_source=(ops / "git_checkout.py").read_bytes()
+    )
+    op = dataclasses.replace(op, risk=risk, preconditions=())
+
+    class Registry:
+        async def get(self, *a, **kw):
+            return op
+
+    class Store:
+        created: dict = {}
+
+        async def create(self, **kw):
+            Store.created = kw
+            return type("A", (), {"id": "appr_1", "expires_at": 0.0})()
+
+    class Audit:
+        async def emit(self, *a, **kw):
+            pass
+
+    rule = PolicyRule(roles=("developer",), targets=("vm-a",), operation_globs=("*",), risks=(risk,),
+                      require_step_up=(), require_four_eyes=(), max_runs_per_hour=0)
+    svc = OperationService(store=Store(), targets={"vm-a": _target("vm-a")}, policy=PolicyMatrix([rule]),
+                           registry=Registry(), tunnel=None, tokens=None, audit=Audit(), executor=None,
+                           reconciler=None, step_up=None)
+    result = await svc.request_operation(DEV, op.id, {"repo": "api", "branch": "main"}, reason="test")
+    assert Store.created["approvals_required"] == expected
+    assert result["requires_four_eyes"] is (expected > 1)

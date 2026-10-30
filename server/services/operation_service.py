@@ -9,6 +9,7 @@ import time
 import uuid
 from typing import Any
 
+from common.approval_sig import required_approvers
 from common.output import normalize_and_flag, redact_secrets, strip_ansi_and_control
 from common.paramschema import InvalidParameter, validate_params
 from server.approvals.store import ApprovalStore
@@ -23,7 +24,6 @@ from server.registry.client import RegistryClient
 from server.tunnel.devd_client import client_for
 from server.tunnel.manager import TunnelManager
 
-FOUR_EYES_RISKS = {"DESTRUCTIVE", "PRIVILEGE"}
 STEP_UP_MAX_AGE_S = 300
 
 TTL_FOR = {
@@ -230,13 +230,18 @@ class OperationService:
         from server.proposals.engine import build_proposal
 
         proposal = build_proposal(principal=principal, target=target, op=op, params=validated, preconditions=preconditions)
-        four_eyes = self._policy.requires_four_eyes(principal, target.id, op)
+        # devd always wants two approvers for DESTRUCTIVE/PRIVILEGE, whatever
+        # the policy file says; never mark APPROVED with fewer than that.
+        approvals_required = required_approvers(
+            op.risk, 2 if self._policy.requires_four_eyes(principal, target.id, op) else 1
+        )
+        four_eyes = approvals_required > 1
 
         approval = await self._store.create(
             principal_id=principal.user_id, request_id=str(uuid.uuid4()), target_id=target.id,
             operation_id=op.id, manifest_version=op.version, manifest_hash=op.content_hash, params=validated,
             preconditions=preconditions, risk_class=op.risk, effect_summary=proposal.effect, reason=reason,
-            proposal_hash=proposal.hash, approvals_required=2 if four_eyes else 1,
+            proposal_hash=proposal.hash, approvals_required=approvals_required,
             ttl_seconds=TTL_FOR.get(op.risk, 600),
         )
         await self._audit.emit(

@@ -16,6 +16,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
+import socket
 from pathlib import Path
 
 import asyncssh
@@ -41,6 +43,29 @@ class HostKeyMismatch(TunnelError):
 
 class TunnelDown(TunnelError):
     pass
+
+
+def bind_private_unix_socket(path: Path) -> socket.socket:
+    """Bind a unix socket that only this OS user can connect to, with no
+    moment where it exists with looser permissions: the umask applies at
+    bind() time, before anyone else could connect. The chmod afterwards is
+    a second guard in case the platform ignores the umask for sockets."""
+    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    old_umask = os.umask(0o177)
+    try:
+        sock.bind(str(path))
+    except OSError:
+        sock.close()
+        raise
+    finally:
+        os.umask(old_umask)
+    try:
+        path.chmod(0o600)
+    except OSError:
+        sock.close()
+        path.unlink(missing_ok=True)
+        raise
+    return sock
 
 
 class TunnelManager:
@@ -94,10 +119,8 @@ class TunnelManager:
             old_listener.close()
 
         try:
-            listener = await asyncio.start_unix_server(
-                lambda r, w: self._bridge(conn, r, w), path=str(socket_path)
-            )
-            socket_path.chmod(0o600)
+            sock = bind_private_unix_socket(socket_path)
+            listener = await asyncio.start_unix_server(lambda r, w: self._bridge(conn, r, w), sock=sock)
         except OSError as exc:
             conn.close()
             raise TunnelDown(str(exc)) from exc
@@ -120,6 +143,9 @@ class TunnelManager:
             try:
                 while data := await reader.read(_CHUNK):
                     proc.stdin.write(data)
+                    # Wait for the SSH channel to accept it, so a large or
+                    # fast request can't pile up in memory here.
+                    await proc.stdin.drain()
                 proc.stdin.write_eof()
             except (asyncssh.Error, OSError, ConnectionError):
                 pass
