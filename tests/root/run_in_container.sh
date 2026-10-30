@@ -17,6 +17,10 @@ exec docker run --rm -v "$REPO:/src:ro" -e MCP_ROOT_TESTS=1 "$IMAGE" sh -euc '
   # Approvers other than the checkout owner need to reach the repo (decide
   # reads data/ from it), so let them into alice home directory.
   chmod 755 /home/alice
+  # /src is owned by the host user (uid 1001 on CI), not root, and git
+  # refuses to clone from a repo it sees as owned by someone else.
+  git config --global --add safe.directory /src
+  git config --global --add safe.directory /src/.git
   git clone -q /src /home/alice/repo
   chown -R alice:alice /home/alice/repo
   retry() { for i in 1 2 3 4 5; do "$@" && return 0; echo "retrying: $*" >&2; sleep 3; done; return 1; }
