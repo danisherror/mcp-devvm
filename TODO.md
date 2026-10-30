@@ -10,8 +10,6 @@ are in [ROADMAP.md](./ROADMAP.md).
 
 ## Robustness (small)
 
-- [ ] **Tunnel socket permissions race.** `server/tunnel/manager.py` creates the local socket and then chmods it to `0600`; set a restrictive umask before creating it.
-- [ ] **No backpressure in the tunnel bridge.** `_bridge` writes to `proc.stdin` without draining, so a large request buffers fully in memory.
 - [ ] **Second approvers on one machine.** `sudo approver-keys enroll --user bob` reads `data/approvers/private/bob.key` from this repo, so every approver's private key has to sit in one user's checkout. Let each user keep theirs in their own home directory.
 
 ## Quick wins (no new infrastructure)
@@ -43,6 +41,8 @@ are in [ROADMAP.md](./ROADMAP.md).
 
 ## Done
 
+- [x] The tunnel's local socket is bound under a `0177` umask, so it is never connectable by other users, even briefly.
+- [x] The tunnel bridge waits for the SSH channel (`drain()`) before reading more, so a large request isn't buffered fully in memory.
 - [x] Approver signatures last until the approval's deadline plus the 120s execution window, so the first four-eyes signature can't expire before the second approver signs.
 - [x] The server asks for as many approvers as devd (`required_approvers()`): DESTRUCTIVE always needs two, whatever the policy file says, and the store won't mark APPROVED with fewer.
 - [x] A malformed approver `.pub` file is skipped with a warning instead of failing every approval.
