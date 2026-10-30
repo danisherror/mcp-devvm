@@ -5,7 +5,10 @@ are in [ROADMAP.md](./ROADMAP.md).
 
 ## Security gaps (fix first)
 
-- [ ] **The protected `decide` still runs in your shell.** `scripts/install_decide.sh` stops repo edits from reaching the CLI, but an agent can edit your shell startup files (e.g. define a function named `/opt/mcp-devvm-approve/bin/decide`). A hardware key / passkey, or approving from a separate OS account, closes this. (ROADMAP Known gap #4)
+- [ ] **`sudo scripts/install_decide.sh` runs the installer from the working tree as root.** The script copies code from a reviewed commit, but the script itself is whatever is in the repo right now, which the agent can edit before you run it. Run it from the reviewed commit instead (e.g. `git show <commit>:scripts/install_decide.sh | sudo sh -s -- <commit>`) and document that, or ship a tiny root-owned bootstrap.
+- [ ] **Try the security-key flow with a real YubiKey.** `init`, `enroll` and `decide approve` are tested through the real python-fido2 client against a software authenticator (`tests/soft_fido.py`, including the PIN protocol), but not yet against hardware.
+- [ ] **Approve on a separate trusted display.** With a security key, the agent can no longer sign on its own, but it still controls the terminal that shows you the request, so it could show one request while the key signs another (one forged approval per real one). Approving on a phone or other device that renders the effect text itself closes this. (ROADMAP Known gap #4)
+- [ ] **Use the security key's signature counter** to spot a cloned key: devd could reject a counter that doesn't increase per approver.
 
 ## Features
 
@@ -30,6 +33,7 @@ are in [ROADMAP.md](./ROADMAP.md).
 
 ## Done
 
+- [x] Approvals are signed by a FIDO2 security key (touch + PIN, enforced by devd); the private key never leaves the device, so capturing what you type no longer lets the agent sign by itself. Passphrase keys are opt-in (`init --passphrase`, `enroll --passphrase-key`). `install_decide.sh` falls back to a pinned, hash-checked standalone Python where the system one is older than 3.10 (macOS). (ROADMAP Known gap #4)
 - [x] Cross-plane correlation report: `python -m scripts.correlate --container mcp-devvm-dev-vm` flags any devd run the server's approvals don't explain (doc §18.4). Run it on a schedule; the auditd half needs auditd.
 - [x] Root-only paths tested as root in an Ubuntu container (`tests/root/`, also in CI). This found two bugs that stopped `install_decide.sh` from running on Linux at all: it read file owners with BSD `stat` syntax, and treated the `/usr/bin/python3` symlink as world-writable.
 - [x] CI (`.github/workflows/ci.yml`): unit and adversarial tests on every push and PR (Python 3.11 and 3.12), integration tests against the dev-VM container.

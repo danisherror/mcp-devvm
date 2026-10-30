@@ -10,8 +10,10 @@ This CLI is the out-of-band channel the agent cannot reach (B4). It reads
 and writes the same SQLite approval store the MCP server uses, so it must be
 run against the same `data/approvals.db` the server was started with.
 
-Approving needs the approver's passphrase (scripts/approver_keys.py). The
-CLI signs the exact proposal and effect text it just showed you; devd
+Approving needs your security key -- a touch, plus its PIN -- or, for an
+approver enrolled with a passphrase key, the passphrase
+(scripts/approver_keys.py). The CLI signs the exact proposal and effect
+text it just showed you; devd
 refuses to run anything that needs approval without that signature, so a
 row an agent writes into the DB by hand is not enough to run anything.
 
@@ -19,8 +21,9 @@ You always sign with your own OS user's approver key. For four-eyes
 operations you can't approve a request you made yourself.
 
 Run this from the root-owned copy that scripts/install_decide.sh makes, not
-from the repo: the agent can edit the repo, and a modified copy of this file
-could capture the passphrase.
+from the repo: the agent can edit the repo, and a modified copy of this
+file could capture the PIN or passphrase, or show you one request while
+signing another.
 """
 
 from __future__ import annotations
@@ -31,22 +34,26 @@ import getpass
 import sys
 from pathlib import Path
 
-from server.approvals.store import Approval, ApprovalStore
 from common.approval_sig import (
+    SignedApproval,
     approver_user,
     effect_hash,
+    fido_signed_approval,
     required_approvers,
     sign_approval,
     signature_deadline,
+    statement_bytes,
 )
 from scripts.approver_keys import (
     TRUSTED_PUBLIC_DIR,
     current_approver_name,
     enrolled_key_matches,
+    enrolled_kind,
+    load_enrolled_credential,
     load_private_key,
     private_key_path,
-    trusted_key_path,
 )
+from server.approvals.store import Approval, ApprovalStore
 from server.auth.principal import resolve_local_principal
 from server.proposals.engine import recompute_proposal_hash
 
@@ -123,14 +130,52 @@ def _my_approver_name() -> str:
     except ValueError as exc:
         print(str(exc), file=sys.stderr)
         raise SystemExit(1) from exc
-    if not private_key_path(name).is_file():
-        print(f"no approver key for OS user '{name}' -- create one with: approver-keys init", file=sys.stderr)
+    kind = enrolled_kind(name)
+    if kind is None:
+        print(f"you have no approver key enrolled in {TRUSTED_PUBLIC_DIR}, so devd would refuse the signature -- "
+              "plug in your security key and run: /opt/mcp-devvm-approve/bin/approver-keys init, then "
+              "sudo /opt/mcp-devvm-approve/bin/approver-keys enroll", file=sys.stderr)
         raise SystemExit(1)
-    if not trusted_key_path(name).is_file():
-        print(f"your approver key isn't enrolled in {TRUSTED_PUBLIC_DIR}, so devd would refuse the signature -- "
-              "run: sudo /opt/mcp-devvm-approve/bin/approver-keys enroll", file=sys.stderr)
+    if kind == "conflict":
+        print(f"both a security key and a passphrase key are enrolled for '{name}', so devd ignores both -- "
+              "re-enroll one with: sudo /opt/mcp-devvm-approve/bin/approver-keys enroll --replace", file=sys.stderr)
+        raise SystemExit(1)
+    if kind == "passphrase" and not private_key_path(name).is_file():
+        print(f"no passphrase key file for '{name}' at {private_key_path(name)}", file=sys.stderr)
         raise SystemExit(1)
     return name
+
+
+def _sign(approver_name: str, approval: Approval, displayed_hash: str) -> SignedApproval:
+    """Sign with whatever devd trusts for you: the security key if one is
+    enrolled, otherwise the passphrase key."""
+    not_after = signature_deadline(approval.expires_at)
+    fields = dict(approval_id=approval.id, proposal_hash=displayed_hash,
+                  effect_hash=effect_hash(approval.effect_summary))
+    if enrolled_kind(approver_name) == "fido2":
+        from scripts.fido import SecurityKeyError, sign_statement
+
+        cred = load_enrolled_credential(approver_name)
+        print("Touch your security key to approve" + (" (it will ask for its PIN)." if cred.user_verification else "."))
+        try:
+            signed = sign_statement(cred, statement_bytes(approver=approver_name, not_after=not_after, **fields))
+        except SecurityKeyError as exc:
+            print(f"{exc} -- not approved", file=sys.stderr)
+            raise SystemExit(1) from None
+        return fido_signed_approval(approver=approver_name, not_after=not_after, signed=signed)
+
+    passphrase = getpass.getpass(f"Passphrase for approver '{approver_name}': ")
+    try:
+        key = load_private_key(approver_name, passphrase)
+    except (ValueError, TypeError):
+        print("wrong passphrase -- not approved", file=sys.stderr)
+        raise SystemExit(1) from None
+    if not enrolled_key_matches(approver_name, key):
+        print(f"your private key doesn't match the one enrolled in {TRUSTED_PUBLIC_DIR} -- not approved "
+              "(re-enroll with: sudo /opt/mcp-devvm-approve/bin/approver-keys enroll --passphrase-key --replace)",
+              file=sys.stderr)
+        raise SystemExit(1)
+    return sign_approval(key, approver=approver_name, not_after=not_after, **fields)
 
 
 async def _approve(store: ApprovalStore, approval_id: str) -> None:
@@ -173,22 +218,7 @@ async def _approve(store: ApprovalStore, approval_id: str) -> None:
             print("aborted -- not approved")
             raise SystemExit(1)
 
-    passphrase = getpass.getpass(f"Passphrase for approver '{approver_name}': ")
-    try:
-        key = load_private_key(approver_name, passphrase)
-    except (ValueError, TypeError):
-        print("wrong passphrase -- not approved", file=sys.stderr)
-        raise SystemExit(1) from None
-    if not enrolled_key_matches(approver_name, key):
-        print(f"your private key doesn't match the one enrolled in {TRUSTED_PUBLIC_DIR} -- not approved "
-              "(re-enroll with: sudo /opt/mcp-devvm-approve/bin/approver-keys enroll --replace)", file=sys.stderr)
-        raise SystemExit(1)
-
-    signed = sign_approval(
-        key, approver=approver_name, approval_id=approval.id,
-        proposal_hash=displayed_hash, effect_hash=effect_hash(approval.effect_summary),
-        not_after=signature_deadline(approval.expires_at),
-    )
+    signed = _sign(approver_name, approval, displayed_hash)
     # decided_by is the key owner's principal id, so the store can compare it
     # with principal_id and count distinct people, like devd does.
     result = await store.record_decision(

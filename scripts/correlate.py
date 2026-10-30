@@ -125,7 +125,7 @@ def correlate(
         approval_id = run.get("approval_id")
         op = run.get("operation_id")
 
-        def flag(problem: str, severity: str = "bypass") -> None:
+        def flag(problem: str, severity: str = "bypass", run_id=run_id, approval_id=approval_id) -> None:
             findings.append(Finding(severity, run_id, approval_id, problem))
 
         if not approval_id or not op or "principal" not in run or "started_at" not in run:

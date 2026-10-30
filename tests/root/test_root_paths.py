@@ -31,16 +31,20 @@ PATH = "/usr/bin:/bin:/usr/sbin:/sbin"
 
 
 def run(cmd: list[str], *, user: str | None = None, sudo_user: str | None = None,
-        answers: tuple[tuple[str, str], ...] = (), timeout: int = 300) -> tuple[int, str]:
+        answers: tuple[tuple[str, str], ...] = (), timeout: int = 300,
+        extra_env: dict[str, str] | None = None) -> tuple[int, str]:
     """Run `cmd` on a terminal, answering prompts in order. `user` runs it as
     that user; `sudo_user` runs it as root the way `sudo` from that user would."""
     import pexpect
 
     env = {"PATH": PATH, "HOME": "/root", "LANG": "C.UTF-8"}
+    # Local wheel cache from run_in_container.sh, if any.
+    env.update({k: v for k, v in os.environ.items() if k in ("PIP_FIND_LINKS", "PIP_NO_INDEX")})
     if user:
         cmd = ["sudo", "-u", user, "-H", "--", *cmd]
     if sudo_user:
         env["SUDO_USER"] = sudo_user
+    env.update(extra_env or {})
     out = io.StringIO()
     child = pexpect.spawn(cmd[0], cmd[1:], env=env, cwd=str(REPO), encoding="utf-8", timeout=timeout)
     child.logfile_read = out
@@ -90,8 +94,14 @@ def test_installed_decide_runs_as_a_user():
     assert code == 0 and "approve" in out, out
 
 
+def test_security_key_init_without_a_key_fails_cleanly():
+    code, out = run([str(KEYS), "init"], user="alice")
+    assert code != 0 and "no security key found" in out, out
+    assert not Path("/home/alice/.mcp-devvm/approver/alice.fido").exists()
+
+
 def test_init_puts_the_key_in_the_users_home():
-    code, out = run([str(KEYS), "init"], user="alice",
+    code, out = run([str(KEYS), "init", "--passphrase"], user="alice",
                     answers=(("New passphrase", PASS), ("Repeat passphrase", PASS)))
     assert code == 0, out
     key = Path("/home/alice/.mcp-devvm/approver/alice.key")
@@ -113,14 +123,22 @@ def test_enroll_refuses_the_repo_copy_as_root():
     assert code != 0 and "copy your user can edit" in out, out
 
 
+def test_enroll_wants_a_security_key_unless_told_otherwise():
+    code, out = run([str(KEYS), "enroll"], sudo_user="alice")
+    assert code != 0 and "--passphrase-key" in out, out
+    assert not (TRUSTED / "alice.pub").exists()
+
+
 def test_enroll_refuses_a_wrong_passphrase():
-    code, out = run([str(KEYS), "enroll"], sudo_user="alice", answers=(("Passphrase for approver", "nope"),))
+    code, out = run([str(KEYS), "enroll", "--passphrase-key"], sudo_user="alice",
+                    answers=(("Passphrase for approver", "nope"),))
     assert code != 0 and "not enrolled" in out
     assert not (TRUSTED / "alice.pub").exists()
 
 
 def test_enroll_writes_a_root_owned_public_key():
-    code, out = run([str(KEYS), "enroll"], sudo_user="alice", answers=(("Passphrase for approver", PASS),))
+    code, out = run([str(KEYS), "enroll", "--passphrase-key"], sudo_user="alice",
+                    answers=(("Passphrase for approver", PASS),))
     assert code == 0, out
     pub = TRUSTED / "alice.pub"
     assert pub.stat().st_uid == 0 and mode(pub) == 0o644
@@ -128,17 +146,18 @@ def test_enroll_writes_a_root_owned_public_key():
 
 
 def test_enroll_twice_needs_replace():
-    code, out = run([str(KEYS), "enroll"], sudo_user="alice", answers=(("Passphrase for approver", PASS),))
+    code, out = run([str(KEYS), "enroll", "--passphrase-key"], sudo_user="alice",
+                    answers=(("Passphrase for approver", PASS),))
     assert code != 0 and "--replace" in out
 
 
 def test_second_approver_enrolls_from_their_own_home():
-    code, out = run([str(KEYS), "init"], user="bob",
+    code, out = run([str(KEYS), "init", "--passphrase"], user="bob",
                     answers=(("New passphrase", PASS), ("Repeat passphrase", PASS)))
     assert code == 0, out
     assert Path("/home/bob/.mcp-devvm/approver/bob.key").is_file()
     assert not (REPO / "data" / "approvers" / "private" / "bob.key").exists()
-    code, out = run([str(KEYS), "enroll", "--user", "bob"], sudo_user="alice",
+    code, out = run([str(KEYS), "enroll", "--passphrase-key", "--user", "bob"], sudo_user="alice",
                     answers=(("Passphrase for approver", PASS),))
     assert code == 0, out
     assert (TRUSTED / "bob.pub").stat().st_uid == 0
@@ -150,7 +169,28 @@ def test_enroll_refuses_a_symlinked_key():
     subprocess.run(["sudo", "-u", "carol", "mkdir", "-p", str(d)], check=True)
     subprocess.run(["sudo", "-u", "carol", "ln", "-s", "/home/alice/.mcp-devvm/approver/alice.key",
                     str(d / "carol.key")], check=True)
-    code, out = run([str(KEYS), "enroll", "--user", "carol"], sudo_user="alice",
+    code, out = run([str(KEYS), "enroll", "--passphrase-key", "--user", "carol"], sudo_user="alice",
                     answers=(("Passphrase for approver", PASS),))
     assert code != 0, out
     assert not (TRUSTED / "carol.pub").exists()
+
+
+def test_list_shows_enrolled_kinds():
+    code, out = run([str(KEYS), "list"], user="alice")
+    assert code == 0 and "passphrase key enrolled" in out and "bob (passphrase)" in out, out
+
+
+def test_installer_can_use_the_pinned_standalone_python():
+    """The path macOS takes (its /usr/bin/python3 is too old), as real root."""
+    prefix, home = Path("/opt/alt-decide"), Path("/opt/alt-python")
+    code, out = run(["sh", "scripts/install_decide.sh", "HEAD"], sudo_user="alice",
+                    answers=(("Install it\\?", "y"),),
+                    extra_env={"MCP_DECIDE_PYTHON": "standalone", "MCP_DECIDE_PREFIX": str(prefix),
+                               "MCP_DECIDE_PYTHON_HOME": str(home)})
+    assert code == 0, out
+    assert "Downloading Python" in out
+    python = next(home.glob("cpython-*/bin/python3"))
+    for p in (home, python.resolve()):
+        assert p.stat().st_uid == 0 and not p.stat().st_mode & 0o022
+    code, out = run([str(prefix / "bin" / "approver-keys"), "--help"], user="alice")
+    assert code == 0 and "security key" in out, out

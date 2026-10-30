@@ -7,7 +7,12 @@ from pathlib import Path
 
 import pytest
 
-from scripts.correlate import approval_free_operations, correlate, load_approvals, load_runs
+from scripts.correlate import (
+    approval_free_operations,
+    correlate,
+    load_approvals,
+    load_runs,
+)
 from server.approvals.store import ApprovalStore
 
 T0 = 1_700_000_000.0

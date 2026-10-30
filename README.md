@@ -62,22 +62,30 @@ uv venv .venv && uv pip install --python .venv/bin/python -e ".[dev]"
 # Install a root-owned copy of the approval CLI that the agent can't edit
 # (it asks you to confirm the git commit it installs from), and create
 # /etc/mcp-devvm/approvers/, the root-owned directory of approver public
-# keys that devd trusts.
+# keys that devd trusts. It needs a root-owned Python 3.10+; where the
+# system one is older (macOS), it downloads a pinned, hash-checked
+# python-build-standalone build into /opt/mcp-devvm-approve-python.
 sudo scripts/install_decide.sh
 
 # Build + start the demo dev-VM container, mint the CA and token-signing
 # keys, and pin the container's real sshd host key into config/targets.yaml.
 .venv/bin/python scripts/setup_dev_vm.py
 
-# Create your approver key. It's named after your OS user, one per user.
-# You pick a passphrase; it's never stored, and you'll type it each time
-# you approve something.
+# Create your approver credential on your FIDO2 security key (a YubiKey or
+# similar; set a PIN on it first). It's named after your OS user, one per
+# user. The private key never leaves the device: every approval needs a
+# touch and the PIN.
 /opt/mcp-devvm-approve/bin/approver-keys init
 
 # Enroll it, so devd trusts it. This needs root because the trusted key
 # directory must not be writable by you (or an agent running as you). It
-# asks for your passphrase to prove the key is yours.
+# has the plugged-in key sign a fresh challenge (touch + PIN), so only a
+# credential on a real key in front of you gets enrolled.
 sudo /opt/mcp-devvm-approve/bin/approver-keys enroll
+
+# No security key? `approver-keys init --passphrase` and
+# `sudo approver-keys enroll --passphrase-key` use a passphrase-encrypted
+# software key instead. It's weaker: see Known limitations.
 
 # Run the MCP server (stdio transport) -- wire this into Claude Code / any
 # MCP client the same way you would any other stdio server:
@@ -90,8 +98,9 @@ sudo /opt/mcp-devvm-approve/bin/approver-keys enroll
 From the agent, `request_operation("git.checkout", {"repo": "api", "branch": "..."}, "reason")`
 returns `{"approval_id": ..., "status": "PENDING"}` and executes nothing.
 Approve or deny it from a **separate terminal** — this is deliberately not
-an MCP tool (doc §7.2, B4). Approving asks for your approver passphrase and
-signs the exact proposal and effect text you were shown:
+an MCP tool (doc §7.2, B4). Approving asks you to touch your security key
+and type its PIN, and signs the exact proposal and effect text you were
+shown:
 
 ```bash
 /opt/mcp-devvm-approve/bin/decide list
@@ -102,7 +111,7 @@ signs the exact proposal and effect text you were shown:
 (`.venv/bin/python -m server.approvals.decide ...` runs the same code from
 the repo. That's fine for trying it out with an agent that has no shell,
 but an agent that can edit the repo could change that copy to capture your
-passphrase.)
+PIN or show you one request while signing another.)
 
 For `DESTRUCTIVE` and `PRIVILEGE` operations, devd needs two approvals from
 two different OS users, and neither can be the user who made the request.
@@ -202,10 +211,10 @@ production posture:
   attribution — just with the CA private key as a 0600 file instead of in a
   KMS. The doc's own fallback ladder for topology-A-without-CA-infra
   explicitly allows this.
-- **Approver keys are passphrase-encrypted files, not hardware keys.**
-  `~/.mcp-devvm/approver/<name>.key` is readable by your OS user, so the
-  passphrase is what protects it. A hardware key or passkey would remove
-  the file entirely; see Known limitations.
+- **Approvals use FIDO2 security keys over USB only.** `decide` talks to
+  the key with python-fido2 (CTAP2 over HID). Phones as authenticators,
+  Touch ID and NFC aren't supported. Passphrase-encrypted software keys
+  remain as an opt-in fallback.
 - **`devd`'s mutating-call handling runs synchronously**, not backgrounded
   with polling (doc §13.5). Every shipped operation finishes in well under a
   second, so `POST /operations/{id}/run` awaits completion and returns the
@@ -320,14 +329,20 @@ tests/             unit, adversarial (isolation/structural), integration
   gets anything that needs approval past devd. The repo copy of
   `decide.py` can be edited by an agent, so use the root-owned copy from
   `sudo scripts/install_decide.sh`, invoked by its full path. That copy
-  still runs as your OS user, inside a shell whose startup files the agent
-  can edit, so a hardware key or a separate OS account for approving is
-  stronger. Use a strong passphrase: the encrypted key file can be copied
-  and attacked offline.
+  still runs as your OS user, in a terminal the agent can tamper with
+  (e.g. through your shell startup files). With a security key, that gets
+  the agent at most one signature per touch, and only while you're
+  approving: it could show you one request while the key signs another,
+  but it can't sign on its own or reuse your PIN without the key and your
+  touch. Only a separate trusted display (approving on another device)
+  closes that last gap. With a passphrase key it's much worse: a captured
+  passphrase plus the encrypted key file lets the agent sign forever, so
+  use a security key if at all possible.
 - **Enrolling approvers needs root.** devd only trusts public keys in
   the root-owned `/etc/mcp-devvm/approvers/`, so an agent running as you
   can't add one of its own. Adding a person means `sudo approver-keys
-  enroll`; revoking one means `sudo rm /etc/mcp-devvm/approvers/<user>.pub`.
+  enroll`; revoking one means `sudo rm /etc/mcp-devvm/approvers/<user>.fido`
+  (or `.pub` for a passphrase key).
   Keys from before this change in `data/approvers/public/` are no longer
   trusted: enroll them again.
 - **Multiple users and targets need some setup by hand.** Add users to

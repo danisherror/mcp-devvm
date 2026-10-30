@@ -25,7 +25,7 @@ flowchart TB
     F --> G[("Approval store: PENDING<br/>server/approvals/store.py")]
 
     G -.->|out-of-band, separate terminal| H["👤 Human reviews<br/>server/approvals/decide.py (CLI)"]
-    H -->|approve: passphrase unlocks<br/>approver key, signs proposal| I[("APPROVED + signature")]
+    H -->|approve: security key signs<br/>proposal (touch + PIN)| I[("APPROVED + signature")]
     H -->|deny| J[("DENIED -- terminal")]
 
     I --> K["Dispatcher notices<br/>(polls every ~2s)"]
@@ -109,7 +109,7 @@ sequenceDiagram
 
     Note over Human,CLI: separate process -- the agent cannot reach this path
     Human->>CLI: decide.py show / approve appr_xxx
-    Human->>CLI: approver passphrase
+    Human->>CLI: touch security key + PIN
     CLI->>Store: record_decision(APPROVE, displayed_hash, signature)
     Store-->>CLI: status=APPROVED
 

@@ -44,7 +44,7 @@ gap discovered later. Both are called out again below because the
 - [x] Precondition capture, canonical hashing with a real test matrix — `common/canonical.py`, `tests/unit/test_canonical.py`
 - [x] `request_operation`, approval state machine (every illegal transition asserted rejected) — `server/approvals/state_machine.py`, `tests/unit/test_state_machine.py`
 - [x] Approval CLI with §19/§23 rendering rules (never truncate, show effect fields even when empty, typed confirmation for high-risk, rate indicator) — `server/approvals/decide.py`
-- [x] Approvals signed with a passphrase-protected approver key and verified by devd, not the server — `common/approval_sig.py`, `scripts/approver_keys.py`, `devd/app.py`
+- [x] Approvals signed with the approver's FIDO2 security key (passphrase-protected software key as a fallback) and verified by devd, not the server — `common/approval_sig.py`, `scripts/approver_keys.py`, `scripts/fido.py`, `devd/app.py`
 - [ ] Push notifications to the human's own channels — none; the CLI's `list`/`show` is pull-only
 
 ### Phase 5 — Mutating operations
@@ -93,9 +93,17 @@ gap discovered later. Both are called out again below because the
    (which proves possession with the passphrase), so an agent can't
    enroll a key of its own; `scripts/setup_dev_vm.py` refuses to mount a
    directory a non-root user can write, except with `--test-approvers`.
-   **Still open:** the CLI runs as your OS user, in a shell whose startup
-   files the agent can edit (TODO.md). A hardware key or a separate
-   approver OS account closes this. Original
+   Approvals are now signed by a FIDO2 security key (`scripts/fido.py`):
+   the private key never leaves the device, and every signature needs a
+   touch plus the key's PIN (enforced by devd from the `user verified`
+   flag, with the PIN rule set by root at enrollment). So capturing what
+   you type in your shell no longer lets an agent sign on its own: it gets
+   at most one signature per touch, only while you're approving.
+   **Still open:** the terminal that shows you the request is still yours,
+   so an agent controlling it could show one request while the key signs
+   another. Approving on a separate trusted display (e.g. a phone) would
+   close that. Passphrase keys are still accepted when enrolled with
+   `--passphrase-key`, and have the old weakness. Original
    finding, for context: found in review, not by testing. `server/approvals/decide.py` runs as
    the same OS user as the MCP server, and `data/approvals.db` is
    readable and writable by that user. Any agent with a terminal tool can
